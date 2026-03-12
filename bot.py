@@ -1,15 +1,16 @@
 print("BOT FILE STARTED")
+
 import discord
 from discord.ext import commands
 import logging
 import asyncio
 import os
-import json
 import random
 import time
 import io
 import re
-from datetime import datetime, timedelta, timezone
+import sqlite3
+from datetime import datetime, timedelta
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageOps
@@ -35,7 +36,7 @@ WELCOME_CHANNEL_NAME = "الترحيب"
 WELCOME_BG_URL = "https://i.postimg.cc/xjvBZgKQ/khlfyt.jpg"
 
 LINE_TRIGGER = "خط"
-LINE_IMAGE_SOURCE = "https://i.postimg.cc/J4dZ9M6W/Chat-GPT-Image-11-mars-2026-05-31-21-m.png"   # حط هنا ملف الصورة داخل الريبو أو رابط مباشر لصورة الخط
+LINE_IMAGE_SOURCE = "https://i.postimg.cc/PrQHV52P/khtt.png"
 
 WELCOME_MEMBER_ROLE = "👥 𝕸𝖇 ❁ عـضـو"
 TICKET_STAFF_ROLE = "𝕺ₙ مــســؤول الــتـكــت"
@@ -47,12 +48,8 @@ ALLOWED_ADMIN_ROLES = [
 ]
 
 LEVEL_CHANNEL_ID = 1480725848842834074
-ECONOMY_CHANNEL_NAME = "ア・「🤖」أوامــر"
-GAMES_CHANNEL_NAME = "モ・「🎉」الــفــعــالــيــات"
 TICKET_CATEGORY_NAME = "🎫 Tickets"
 
-
-# رتب المستوى
 LEVEL_ROLES = {
     3: "👥 𝕸𝖇 ❁ 𝓼𝓲𝓵𝓿𝓮𝓻",
     6: "👥 𝕸𝖇 ❁ 𝓰𝓸𝓵𝓭",
@@ -61,70 +58,141 @@ LEVEL_ROLES = {
     20: "👥 𝕸𝖇 ❁ 𝓵𝓮𝓰𝓮𝓷𝓭",
 }
 
+SPAM_MAX_MESSAGES = 6
+SPAM_INTERVAL_SECONDS = 8
+SPAM_TIMEOUT_MINUTES = 10
+
 # =========================
-# ملفات التخزين
+# Database
 # =========================
 DATA_DIR = "data"
-WARNINGS_FILE = os.path.join(DATA_DIR, "warnings.json")
-BALANCES_FILE = os.path.join(DATA_DIR, "balances.json")
-LEVELS_FILE = os.path.join(DATA_DIR, "levels.json")
-DAILY_FILE = os.path.join(DATA_DIR, "daily.json")
-TICKETS_FILE = os.path.join(DATA_DIR, "tickets.json")
-
-warnings_data = {}
-balances_data = {}
-levels_data = {}
-daily_data = {}
-tickets_data = {}
+DB_PATH = os.path.join(DATA_DIR, "bot_data.db")
 
 unauthorized_attempts = {}
 xp_cooldowns = {}
-chairs_games = {}
-xo_games = {}
+spam_tracker = {}
 
 # =========================
-# أدوات ملفات
+# Database helpers
 # =========================
 def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs("temp", exist_ok=True)
 
-def load_json(path, default):
-    if not os.path.exists(path):
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def load_all_data():
-    global warnings_data, balances_data, levels_data, daily_data, tickets_data
+def get_db():
     ensure_data_dir()
-    warnings_data = load_json(WARNINGS_FILE, {})
-    balances_data = load_json(BALANCES_FILE, {})
-    levels_data = load_json(LEVELS_FILE, {})
-    daily_data = load_json(DAILY_FILE, {})
-    tickets_data = load_json(TICKETS_FILE, {})
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def save_warnings():
-    save_json(WARNINGS_FILE, warnings_data)
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
 
-def save_balances():
-    save_json(BALANCES_FILE, balances_data)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS warnings (
+            user_id TEXT PRIMARY KEY,
+            count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
 
-def save_levels():
-    save_json(LEVELS_FILE, levels_data)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS levels (
+            user_id TEXT PRIMARY KEY,
+            xp INTEGER NOT NULL DEFAULT 0,
+            level INTEGER NOT NULL DEFAULT 0
+        )
+    """)
 
-def save_daily():
-    save_json(DAILY_FILE, daily_data)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tickets (
+            user_id TEXT PRIMARY KEY,
+            channel_id INTEGER NOT NULL
+        )
+    """)
 
-def save_tickets():
-    save_json(TICKETS_FILE, tickets_data)
+    conn.commit()
+    conn.close()
+
+def get_warning_count(user_id: int) -> int:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT count FROM warnings WHERE user_id = ?", (str(user_id),))
+    row = cur.fetchone()
+    conn.close()
+    return int(row["count"]) if row else 0
+
+def set_warning_count(user_id: int, count: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO warnings (user_id, count)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET count=excluded.count
+    """, (str(user_id), int(count)))
+    conn.commit()
+    conn.close()
+
+def add_warning(user_id: int) -> int:
+    current = get_warning_count(user_id) + 1
+    set_warning_count(user_id, current)
+    return current
+
+def get_user_level_record(user_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT xp, level FROM levels WHERE user_id = ?", (str(user_id),))
+    row = cur.fetchone()
+
+    if row:
+        record = {"xp": int(row["xp"]), "level": int(row["level"])}
+    else:
+        cur.execute(
+            "INSERT INTO levels (user_id, xp, level) VALUES (?, 0, 0)",
+            (str(user_id),)
+        )
+        conn.commit()
+        record = {"xp": 0, "level": 0}
+
+    conn.close()
+    return record
+
+def save_user_level_record(user_id: int, xp: int, level: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO levels (user_id, xp, level)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET xp=excluded.xp, level=excluded.level
+    """, (str(user_id), int(xp), int(level)))
+    conn.commit()
+    conn.close()
+
+def get_ticket_channel_id(user_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT channel_id FROM tickets WHERE user_id = ?", (str(user_id),))
+    row = cur.fetchone()
+    conn.close()
+    return int(row["channel_id"]) if row else None
+
+def set_ticket_channel_id(user_id: int, channel_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO tickets (user_id, channel_id)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET channel_id=excluded.channel_id
+    """, (str(user_id), int(channel_id)))
+    conn.commit()
+    conn.close()
+
+def delete_ticket_record(user_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tickets WHERE user_id = ?", (str(user_id),))
+    conn.commit()
+    conn.close()
 
 # =========================
 # مساعدات عامة
@@ -154,32 +222,7 @@ async def count_unauthorized_attempt(ctx):
         unauthorized_attempts[uid] = 0
         await ctx.send("مش بس يحبيبي صدعتني")
 
-def get_balance(user_id: int) -> int:
-    return int(balances_data.get(str(user_id), 0))
-
-def set_balance(user_id: int, amount: int):
-    balances_data[str(user_id)] = max(0, int(amount))
-    save_balances()
-
-def add_balance(user_id: int, amount: int):
-    set_balance(user_id, get_balance(user_id) + int(amount))
-
-def remove_balance(user_id: int, amount: int) -> bool:
-    current = get_balance(user_id)
-    if current < amount:
-        return False
-    set_balance(user_id, current - int(amount))
-    return True
-
-def get_user_level_record(user_id: int):
-    uid = str(user_id)
-    if uid not in levels_data:
-        levels_data[uid] = {"xp": 0, "level": 0}
-        save_levels()
-    return levels_data[uid]
-
 def xp_needed_for_level(level: int) -> int:
-    # إجمالي XP المطلوب للوصول لهذا المستوى
     return 120 * (level ** 2) + 80 * level
 
 def level_from_xp(xp: int) -> int:
@@ -191,9 +234,6 @@ def level_from_xp(xp: int) -> int:
 def get_next_level_xp(level: int) -> int:
     return xp_needed_for_level(level + 1)
 
-def format_duration_ar(duration: str) -> str:
-    return duration
-
 def sanitize_channel_name(name: str) -> str:
     name = name.lower()
     name = re.sub(r"[^a-zA-Z0-9\u0600-\u06FF_-]", "-", name)
@@ -201,12 +241,19 @@ def sanitize_channel_name(name: str) -> str:
     return name[:50] if name else "ticket"
 
 def parse_duration(text: str):
-    if text.endswith("د"):
-        minutes = int(text[:-1])
-        return timedelta(minutes=minutes)
-    if text.endswith("س"):
-        hours = int(text[:-1])
-        return timedelta(hours=hours)
+    try:
+        if text.endswith("د"):
+            minutes = int(text[:-1])
+            if minutes <= 0:
+                return None
+            return timedelta(minutes=minutes)
+        if text.endswith("س"):
+            hours = int(text[:-1])
+            if hours <= 0:
+                return None
+            return timedelta(hours=hours)
+    except ValueError:
+        return None
     return None
 
 def get_ticket_owner_id_from_topic(topic: str):
@@ -216,14 +263,6 @@ def get_ticket_owner_id_from_topic(topic: str):
     if match:
         return int(match.group(1))
     return None
-
-def get_ticket_type_from_topic(topic: str):
-    if not topic:
-        return "عام"
-    match = re.search(r"type:(.+)$", topic)
-    if match:
-        return match.group(1).strip()
-    return "عام"
 
 async def can_manage_target(ctx, member: discord.Member):
     if member == bot.user:
@@ -258,9 +297,8 @@ async def create_welcome_image(member: discord.Member) -> io.BytesIO:
     bg = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
     avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
 
-    bg_w, bg_h = bg.size
+    bg_w, _ = bg.size
 
-    # دائرة المنتصف
     circle_size = 430
     circle_x = (bg_w - circle_size) // 2
     circle_y = 210
@@ -271,7 +309,6 @@ async def create_welcome_image(member: discord.Member) -> io.BytesIO:
     draw = ImageDraw.Draw(mask)
     draw.ellipse((0, 0, circle_size, circle_size), fill=255)
 
-    # حافة خفيفة
     border = Image.new("RGBA", (circle_size + 10, circle_size + 10), (0, 0, 0, 0))
     border_mask = Image.new("L", (circle_size + 10, circle_size + 10), 0)
     border_draw = ImageDraw.Draw(border_mask)
@@ -289,17 +326,9 @@ async def create_welcome_image(member: discord.Member) -> io.BytesIO:
 
 async def send_line_image(channel: discord.TextChannel):
     try:
-        if LINE_IMAGE_SOURCE.startswith("http://") or LINE_IMAGE_SOURCE.startswith("https://"):
-            embed = discord.Embed(color=discord.Color.dark_red())
-            embed.set_image(url=LINE_IMAGE_SOURCE)
-            await channel.send(embed=embed)
-        elif os.path.exists(LINE_IMAGE_SOURCE):
-            file = discord.File(LINE_IMAGE_SOURCE, filename="line.png")
-            embed = discord.Embed(color=discord.Color.dark_red())
-            embed.set_image(url="attachment://line.png")
-            await channel.send(file=file, embed=embed)
-    except Exception:
-        pass
+        await channel.send(LINE_IMAGE_SOURCE)
+    except Exception as e:
+        await channel.send(f"❌ حصل خطأ: {e}")
 
 # =========================
 # Embeds
@@ -346,7 +375,7 @@ def make_levelup_embed(member: discord.Member, new_level: int):
     embed = discord.Embed(
         description=(
             f"مبروك {member.mention}\n"
-            f"تم ترقية مستواك إلى **\" {new_level} \"**\n"
+            f"تم ترقية مستواك إلى **{new_level}**\n"
             f"شد حيلك عشان توصل للمستوى اللي بعده 🚀"
         ),
         color=discord.Color.dark_red()
@@ -399,8 +428,7 @@ class TicketManageView(discord.ui.View):
         try:
             channel = interaction.channel
             if isinstance(channel, discord.TextChannel):
-                tickets_data.pop(str(owner_id), None)
-                save_tickets()
+                delete_ticket_record(owner_id)
                 await channel.delete(reason=f"Ticket closed by {interaction.user}")
         except Exception:
             pass
@@ -424,7 +452,7 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.send_message("❌ ليس لديك إذن لفتح تكت.", ephemeral=True)
             return
 
-        existing_channel_id = tickets_data.get(str(member.id))
+        existing_channel_id = get_ticket_channel_id(member.id)
         if existing_channel_id:
             ch = guild.get_channel(existing_channel_id)
             if ch:
@@ -458,8 +486,7 @@ class TicketPanelView(discord.ui.View):
             topic=f"owner_id:{member.id} | type:{ticket_type}"
         )
 
-        tickets_data[str(member.id)] = channel.id
-        save_tickets()
+        set_ticket_channel_id(member.id, channel.id)
 
         embed = make_ticket_embed(guild, member, ticket_type)
         manage_view = TicketManageView()
@@ -484,15 +511,14 @@ class TicketPanelView(discord.ui.View):
 # =========================
 @bot.event
 async def on_ready():
-    load_all_data()
+    init_db()
     bot.add_view(TicketPanelView())
     bot.add_view(TicketManageView())
-    print("✅ VERSION NEW")
+    print("✅ VERSION SQLITE")
     print(f"البوت شغال كـ {bot.user}")
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    # رتبة العضو
     member_role = discord.utils.get(member.guild.roles, name=WELCOME_MEMBER_ROLE)
     if member_role:
         try:
@@ -533,10 +559,7 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip()
-    print(f"MSG: {message.author} -> {message.content}")
 
-
-    # ردود ثابتة
     if content == "السلام عليكم":
         await message.channel.send("وعليكم السلام ورحمة الله وبركاته")
         return
@@ -545,7 +568,6 @@ async def on_message(message: discord.Message):
         await message.channel.send("شيلها يا حبيبي")
         return
 
-    # خط .
     if content == LINE_TRIGGER:
         if is_admin_member(message.author):
             try:
@@ -555,45 +577,66 @@ async def on_message(message: discord.Message):
             await send_line_image(message.channel)
         return
 
-    # منشن البوت من إداري => everyone/here
-    if bot.user in message.mentions and is_admin_member(message.author):
-        try:
+    if content == "منشن":
+        if is_admin_member(message.author):
+            try:
+                await message.delete()
+            except Exception:
+                pass
             await message.channel.send(
                 "@everyone @here",
                 allowed_mentions=discord.AllowedMentions(everyone=True)
             )
-        except Exception:
-            pass
         return
 
-    # XP - فقط الرسائل العادية غير الأوامر
-    if not content.startswith("."):
-        now = time.time()
-        uid = str(message.author.id)
+    # مكافحة السبام
+    now = time.time()
+    uid = str(message.author.id)
+    msg_times = spam_tracker.get(uid, [])
+    msg_times = [t for t in msg_times if now - t <= SPAM_INTERVAL_SECONDS]
+    msg_times.append(now)
+    spam_tracker[uid] = msg_times
+
+    if len(msg_times) >= SPAM_MAX_MESSAGES:
+        spam_tracker[uid] = []
+        if not is_admin_member(message.author):
+            try:
+                until = discord.utils.utcnow() + timedelta(minutes=SPAM_TIMEOUT_MINUTES)
+                await message.author.edit(
+                    timed_out_until=until,
+                    reason="Auto spam timeout"
+                )
+                await message.channel.send(
+                    f"🚫 {message.author.mention} أخذ تايم {SPAM_TIMEOUT_MINUTES} دقائق بسبب السبام."
+                )
+            except Exception as e:
+                print(f"Spam timeout error: {e}")
+        return
+
+    # XP
+    if not content.startswith(".") and content:
         last_time = xp_cooldowns.get(uid, 0)
 
-        if now - last_time >= 45:
+        if now - last_time >= 30:
             xp_cooldowns[uid] = now
 
             record = get_user_level_record(message.author.id)
             old_level = record["level"]
 
-            gained_xp = random.randint(8, 15)
-            record["xp"] += gained_xp
-            new_level = level_from_xp(record["xp"])
-            record["level"] = new_level
-            save_levels()
+            gained_xp = random.randint(10, 18)
+            new_xp = record["xp"] + gained_xp
+            new_level = level_from_xp(new_xp)
 
-            # ترقية مستوى
+            save_user_level_record(message.author.id, new_xp, new_level)
+
             if new_level > old_level:
                 level_channel = message.guild.get_channel(LEVEL_CHANNEL_ID)
                 if level_channel:
                     embed = make_levelup_embed(message.author, new_level)
                     await level_channel.send(embed=embed)
 
-                # إعطاء رتبة المستوى المناسبة
-                guild_roles_to_manage = [role_name for role_name in LEVEL_ROLES.values()]
-                roles_to_remove = [discord.utils.get(message.guild.roles, name=r) for r in guild_roles_to_manage]
+                level_role_names = list(LEVEL_ROLES.values())
+                roles_to_remove = [discord.utils.get(message.guild.roles, name=r) for r in level_role_names]
                 roles_to_remove = [r for r in roles_to_remove if r is not None]
 
                 highest_role_name = None
@@ -625,9 +668,6 @@ async def on_command_error(ctx, error):
         if ctx.command and ctx.command.name == "ت":
             await ctx.send("❌ استخدم: `.ت @الشخص السبب`")
             return
-        if ctx.command and ctx.command.name == "تحويل":
-            await ctx.send("❌ استخدم: `.تحويل @الشخص 100`")
-            return
         if ctx.command and ctx.command.name == "حذف":
             await ctx.send("❌ استخدم: `.حذف 10`")
             return
@@ -652,11 +692,7 @@ async def warn_command(ctx, member: discord.Member, *, reason: str):
     if not await can_manage_target(ctx, member):
         return
 
-    uid = str(member.id)
-    warnings_data[uid] = warnings_data.get(uid, 0) + 1
-    count = warnings_data[uid]
-    save_warnings()
-
+    count = add_warning(member.id)
     embed = make_warn_embed(ctx, member, reason, count)
 
     try:
@@ -672,7 +708,7 @@ async def show_warnings(ctx, member: discord.Member):
         await count_unauthorized_attempt(ctx)
         return
 
-    count = warnings_data.get(str(member.id), 0)
+    count = get_warning_count(member.id)
     embed = discord.Embed(
         title="⚠️ التحذيرات",
         description=f"{member.mention} لديه **{count}** تحذيرات.",
@@ -686,8 +722,7 @@ async def reset_warnings(ctx, member: discord.Member):
         await count_unauthorized_attempt(ctx)
         return
 
-    warnings_data[str(member.id)] = 0
-    save_warnings()
+    set_warning_count(member.id, 0)
     await ctx.send(f"✅ تم تصفير تحذيرات {member.mention}")
 
 @bot.command(name="تايم")
@@ -784,7 +819,7 @@ async def ban_command(ctx, member: discord.Member, *, reason: str = "بدون س
 
 @bot.command(name="حذف")
 async def clear_command(ctx, amount: int):
-    if not is_admin_member(ctx.author):
+    if not (is_owner_user(ctx.author) or is_admin_member(ctx.author)):
         await count_unauthorized_attempt(ctx)
         return
 
@@ -794,94 +829,6 @@ async def clear_command(ctx, amount: int):
 
     await ctx.channel.purge(limit=amount + 1)
     await ctx.send(f"🧹 تم مسح {amount} رسالة", delete_after=3)
-
-# =========================
-# أوامر الكريدت الداخلية
-# =========================
-@bot.command(name="p")
-async def balance_command(ctx, member: discord.Member = None):
-    allowed = can_use_member_features(ctx.author)
-    if not allowed:
-        await count_unauthorized_attempt(ctx)
-        return
-
-    if not is_admin_member(ctx.author) and ctx.channel.name != ECONOMY_CHANNEL_NAME:
-        return
-
-    target = member or ctx.author
-    embed = discord.Embed(
-        title="💰 الرصيد",
-        description=f"رصيد {target.mention}: **{get_balance(target.id)}** كريدت",
-        color=discord.Color.dark_red()
-    )
-    embed.set_thumbnail(url=target.display_avatar.url)
-    await ctx.send(embed=embed)
-
-@bot.command(name="يومي")
-async def daily_command(ctx):
-    allowed = can_use_member_features(ctx.author)
-    if not allowed:
-        await count_unauthorized_attempt(ctx)
-        return
-
-    if not is_admin_member(ctx.author) and ctx.channel.name != ECONOMY_CHANNEL_NAME:
-        return
-
-    uid = str(ctx.author.id)
-    now = datetime.now(timezone.utc)
-
-    if uid in daily_data:
-        last = datetime.fromisoformat(daily_data[uid])
-        if (now - last).total_seconds() < 86400:
-            left = int(86400 - (now - last).total_seconds())
-            hours = left // 3600
-            minutes = (left % 3600) // 60
-            await ctx.send(f"⏳ تقدر تستلم اليومي بعد {hours}س و {minutes}د")
-            return
-
-    add_balance(ctx.author.id, 250)
-    daily_data[uid] = now.isoformat()
-    save_daily()
-    await ctx.send(f"🎁 أخذت 250 كريدت. رصيدك الآن: **{get_balance(ctx.author.id)}**")
-
-@bot.command(name="تحويل")
-async def transfer_command(ctx, member: discord.Member, amount: int):
-    allowed = can_use_member_features(ctx.author)
-    if not allowed:
-        await count_unauthorized_attempt(ctx)
-        return
-
-    if not is_admin_member(ctx.author) and ctx.channel.name != ECONOMY_CHANNEL_NAME:
-        return
-
-    if member.bot:
-        await ctx.send("❌ لا يمكن التحويل إلى بوت.")
-        return
-    if member == ctx.author:
-        await ctx.send("❌ لا يمكن التحويل لنفسك.")
-        return
-    if amount <= 0:
-        await ctx.send("❌ اكتب مبلغ أكبر من 0.")
-        return
-    if not remove_balance(ctx.author.id, amount):
-        await ctx.send("❌ رصيدك غير كافٍ.")
-        return
-
-    add_balance(member.id, amount)
-    await ctx.send(f"✅ تم تحويل {amount} كريدت إلى {member.mention}")
-
-@bot.command(name="اعطاء")
-async def give_balance_command(ctx, member: discord.Member, amount: int):
-    if not is_admin_member(ctx.author):
-        await count_unauthorized_attempt(ctx)
-        return
-
-    if amount <= 0:
-        await ctx.send("❌ اكتب مبلغ أكبر من 0.")
-        return
-
-    add_balance(member.id, amount)
-    await ctx.send(f"✅ تم إعطاء {amount} كريدت إلى {member.mention}")
 
 # =========================
 # أوامر المستوى
@@ -907,185 +854,6 @@ async def level_command(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 # =========================
-# الألعاب
-# =========================
-@bot.command(name="روليت")
-async def roulette_command(ctx, amount: int):
-    allowed = can_use_member_features(ctx.author)
-    if not allowed:
-        await count_unauthorized_attempt(ctx)
-        return
-
-    if not is_admin_member(ctx.author) and ctx.channel.name != GAMES_CHANNEL_NAME:
-        return
-
-    if amount <= 0:
-        await ctx.send("❌ اكتب مبلغ أكبر من 0.")
-        return
-    if get_balance(ctx.author.id) < amount:
-        await ctx.send("❌ رصيدك غير كافٍ.")
-        return
-
-    win = random.choice([True, False])
-    if win:
-        add_balance(ctx.author.id, amount)
-        await ctx.send(f"🎉 ربحت {amount} كريدت!")
-    else:
-        remove_balance(ctx.author.id, amount)
-        await ctx.send(f"💔 خسرت {amount} كريدت!")
-
-@bot.command(name="كراسي")
-async def chairs_create_command(ctx):
-    allowed = can_use_member_features(ctx.author)
-    if not allowed:
-        await count_unauthorized_attempt(ctx)
-        return
-
-    if not is_admin_member(ctx.author) and ctx.channel.name != GAMES_CHANNEL_NAME:
-        return
-
-    if ctx.channel.id in chairs_games:
-        await ctx.send("❌ توجد لعبة كراسي شغالة بالفعل.")
-        return
-
-    chairs_games[ctx.channel.id] = {"players": [ctx.author.id], "started": False}
-    await ctx.send("🎵 بدأت لعبة كراسي! للإنضمام: `.دخول` وللبدء: `.ابدأ_كراسي`")
-
-@bot.command(name="دخول")
-async def chairs_join_command(ctx):
-    allowed = can_use_member_features(ctx.author)
-    if not allowed:
-        await count_unauthorized_attempt(ctx)
-        return
-
-    if ctx.channel.id not in chairs_games:
-        return
-
-    game = chairs_games[ctx.channel.id]
-    if game["started"]:
-        return
-    if ctx.author.id in game["players"]:
-        return
-
-    game["players"].append(ctx.author.id)
-    await ctx.send(f"✅ {ctx.author.mention} انضم للعبة.")
-
-@bot.command(name="ابدأ_كراسي")
-async def chairs_start_command(ctx):
-    if ctx.channel.id not in chairs_games:
-        return
-
-    game = chairs_games[ctx.channel.id]
-    if len(game["players"]) < 2:
-        await ctx.send("❌ لازم لاعبين على الأقل.")
-        return
-
-    game["started"] = True
-    players = game["players"][:]
-    await ctx.send("🎶 بدأت الموسيقى...")
-
-    while len(players) > 1:
-        await asyncio.sleep(2)
-        out_id = random.choice(players)
-        players.remove(out_id)
-        member = ctx.guild.get_member(out_id)
-        await ctx.send(f"🪑 خرج: {member.mention if member else out_id}")
-
-    winner_id = players[0]
-    winner = ctx.guild.get_member(winner_id)
-    add_balance(winner_id, 300)
-    await ctx.send(f"🏆 الفائز: {winner.mention if winner else winner_id} وربح 300 كريدت")
-    chairs_games.pop(ctx.channel.id, None)
-
-@bot.command(name="اكس")
-async def xo_start_command(ctx, opponent: discord.Member):
-    allowed = can_use_member_features(ctx.author)
-    if not allowed:
-        await count_unauthorized_attempt(ctx)
-        return
-
-    if not is_admin_member(ctx.author) and ctx.channel.name != GAMES_CHANNEL_NAME:
-        return
-
-    if opponent.bot or opponent == ctx.author:
-        return
-
-    if ctx.channel.id in xo_games:
-        await ctx.send("❌ توجد لعبة X O شغالة.")
-        return
-
-    xo_games[ctx.channel.id] = {
-        "players": [ctx.author.id, opponent.id],
-        "turn": ctx.author.id,
-        "board": [" "] * 9,
-        "symbols": {ctx.author.id: "X", opponent.id: "O"}
-    }
-
-    await ctx.send(
-        f"❎⭕ بدأت اللعبة بين {ctx.author.mention} و {opponent.mention}\n"
-        f"الدور الآن على: {ctx.author.mention}\n"
-        f"للعب اكتب: `.لعب 5`"
-    )
-
-def format_xo_board(board):
-    cells = [board[i] if board[i] != " " else str(i + 1) for i in range(9)]
-    return (
-        f"`{cells[0]}` | `{cells[1]}` | `{cells[2]}`\n"
-        f"`{cells[3]}` | `{cells[4]}` | `{cells[5]}`\n"
-        f"`{cells[6]}` | `{cells[7]}` | `{cells[8]}`"
-    )
-
-def check_xo_winner(board, symbol):
-    wins = [
-        (0,1,2),(3,4,5),(6,7,8),
-        (0,3,6),(1,4,7),(2,5,8),
-        (0,4,8),(2,4,6)
-    ]
-    return any(board[a] == board[b] == board[c] == symbol for a, b, c in wins)
-
-@bot.command(name="لعب")
-async def xo_play_command(ctx, position: int):
-    if ctx.channel.id not in xo_games:
-        return
-
-    game = xo_games[ctx.channel.id]
-    if ctx.author.id not in game["players"]:
-        return
-    if game["turn"] != ctx.author.id:
-        return
-    if position < 1 or position > 9:
-        return
-
-    idx = position - 1
-    if game["board"][idx] != " ":
-        return
-
-    symbol = game["symbols"][ctx.author.id]
-    game["board"][idx] = symbol
-
-    if check_xo_winner(game["board"], symbol):
-        add_balance(ctx.author.id, 200)
-        await ctx.send(f"{format_xo_board(game['board'])}\n\n🏆 الفائز: {ctx.author.mention} وربح 200 كريدت")
-        xo_games.pop(ctx.channel.id, None)
-        return
-
-    if " " not in game["board"]:
-        await ctx.send(f"{format_xo_board(game['board'])}\n\n🤝 تعادل")
-        xo_games.pop(ctx.channel.id, None)
-        return
-
-    next_player = game["players"][0] if game["players"][1] == ctx.author.id else game["players"][1]
-    game["turn"] = next_player
-    next_member = ctx.guild.get_member(next_player)
-    await ctx.send(f"{format_xo_board(game['board'])}\n\n➡️ الدور الآن على: {next_member.mention if next_member else next_player}")
-
-@bot.command(name="الغاء_اكس")
-async def xo_cancel_command(ctx):
-    if ctx.channel.id in xo_games:
-        xo_games.pop(ctx.channel.id, None)
-        await ctx.send("✅ تم إلغاء لعبة X O")
-
-# =========================
 # التكت
 # =========================
 @bot.command(name="تكت")
@@ -1097,14 +865,25 @@ async def send_ticket_panel_command(ctx):
     embed = discord.Embed(
         title="🎫 نظام التكت",
         description=(
-            f"**الدعم الفني**\n"
-            f"هذه التذكرة مخصصة إذا واجهتك مشكلة أو للاستفسار.\n\n"
-            f"**البلاغات**\n"
-            f"هذه التذكرة مخصصة في حالة أردت الإبلاغ عن شخص أو إداري.\n\n"
-            f"اختر الزر المناسب من الأسفل."
+            "**ملاحظات**\n"
+            "• عدم فتح التكت لسبب تافه.\n"
+            "• عدم الفتح للسؤال عن التقييم.\n"
+            "• ممنوع فتح ونسحب.\n"
+            "• عقوبة ما سبق: تايم 15 دقيقة.\n\n"
+            "**الدعم الفني**\n"
+            "• للاستفسار أو طلب مساعدة.\n"
+            "• شراء رتب.\n"
+            "• أخذ تحذير عن طريق الخطأ.\n\n"
+            "**البلاغات**\n"
+            "• الإبلاغ عن شخص سبب وفتن.\n"
+            "• الإبلاغ عن نصب.\n"
+            "• الإبلاغ عن إداري.\n"
+            "• الإبلاغ عن مشكلة بالسيرفر.\n\n"
+            "اختر الزر المناسب من الأسفل."
         ),
         color=discord.Color.dark_red()
     )
+
     if ctx.guild.icon:
         embed.set_thumbnail(url=ctx.guild.icon.url)
 
@@ -1114,6 +893,7 @@ async def send_ticket_panel_command(ctx):
 @bot.command(name="تيست")
 async def test_command(ctx):
     await ctx.send("شغال")
+
 # =========================
 # تشغيل
 # =========================
@@ -1122,11 +902,4 @@ if __name__ == "__main__":
     if token:
         bot.run(token)
     else:
-
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
-
-
-
-
-
-
