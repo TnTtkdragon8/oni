@@ -514,6 +514,36 @@ async def on_message(message: discord.Message):
         return
 
     # خط
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or message.guild is None:
+        return
+
+    content = message.content.strip()
+
+    # فلتر الشتائم
+    for word in BAD_WORDS:
+        if word in content:
+            try:
+                await message.delete()
+                await message.channel.send(
+                    f"❌ ممنوع استعمال كلمات نابية يا {message.author.mention}",
+                    delete_after=5
+                )
+            except Exception:
+                pass
+            return
+
+    # ردود ثابتة
+    if content == "السلام عليكم":
+        await message.channel.send("وعليكم السلام ورحمة الله وبركاته")
+        return
+
+    if content == ".":
+        await message.channel.send("شيلها يا حبيبي")
+        return
+
+    # خط
     if content == LINE_TRIGGER:
         if is_admin_member(message.author):
             try:
@@ -522,6 +552,64 @@ async def on_message(message: discord.Message):
                 pass
             await send_line_image(message.channel)
         return
+
+    # أمر منشن
+    if content == "منشن":
+        if is_admin_member(message.author):
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+            await message.channel.send(
+                "@everyone @here",
+                allowed_mentions=discord.AllowedMentions(everyone=True)
+            )
+        return
+
+    # XP
+    now = time.time()
+    uid = str(message.author.id)
+    last_time = xp_cooldowns.get(uid, 0)
+
+    if now - last_time >= 45:
+        xp_cooldowns[uid] = now
+
+        record = get_user_level_record(message.author.id)
+        old_level = record["level"]
+
+        gained_xp = random.randint(8, 15)
+        record["xp"] += gained_xp
+        new_level = level_from_xp(record["xp"])
+        record["level"] = new_level
+        save_levels()
+
+        if new_level > old_level:
+            level_channel = message.guild.get_channel(LEVEL_CHANNEL_ID)
+            if level_channel:
+                embed = make_levelup_embed(message.author, new_level)
+                await level_channel.send(embed=embed)
+
+            guild_roles_to_manage = [role_name for role_name in LEVEL_ROLES.values()]
+            roles_to_remove = [discord.utils.get(message.guild.roles, name=r) for r in guild_roles_to_manage]
+            roles_to_remove = [r for r in roles_to_remove if r is not None]
+
+            highest_role_name = None
+            for lvl, role_name in sorted(LEVEL_ROLES.items()):
+                if new_level >= lvl:
+                    highest_role_name = role_name
+
+            role_to_add = discord.utils.get(message.guild.roles, name=highest_role_name) if highest_role_name else None
+
+            try:
+                if roles_to_remove:
+                    await message.author.remove_roles(*roles_to_remove, reason="Level role update")
+                if role_to_add:
+                    await message.author.add_roles(role_to_add, reason="Level up reward")
+            except Exception:
+                pass
+
+    await bot.process_commands(message)
 
     # منشن البوت من إداري
 # أمر منشن
@@ -994,4 +1082,5 @@ if __name__ == "__main__":
     else:
 
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
 
