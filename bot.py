@@ -11,6 +11,7 @@ import io
 import re
 import sqlite3
 from datetime import datetime, timedelta
+from typing import Optional
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageOps
@@ -47,9 +48,23 @@ ALLOWED_ADMIN_ROLES = [
     "𝕺ₙ مسؤول إداره"
 ]
 
+# رتب إضافية للتمنشن في التكت العادي
+# زوّد هنا براحتك بعدين
+EXTRA_NORMAL_TICKET_MENTION_ROLES = [
+    # "رتبة إضافية 1",
+    # "رتبة إضافية 2",
+]
+
+# رتب إضافية تراقب تكت الوسيط بدون ما تكون هي الرتبة المطلوبة
+# زوّد هنا براحتك بعدين
+EXTRA_MEDIATOR_WATCH_ROLES = [
+    # "رتبة إضافية 1",
+]
+
 LEVEL_CHANNEL_ID = 1480725848842834074
 COMMANDS_CHANNEL_NAME = "ア・「🤖」أوامــر"
 TICKET_CATEGORY_NAME = "🎫 Tickets"
+MEDIATOR_TICKET_CATEGORY_NAME = "🎫 Mediator Tickets"
 
 LEVEL_ROLES = {
     3: "👥 𝕸𝖇 ❁ 𝓼𝓲𝓵𝓿𝓮𝓻",
@@ -59,12 +74,21 @@ LEVEL_ROLES = {
     20: "👥 𝕸𝖇 ❁ 𝓵𝓮𝓰𝓮𝓷𝓭",
 }
 
+MEDIATOR_ROLE_OPTIONS = [
+    ("🥉", "وسيط مبتدئ 𝕺ₙ"),
+    ("🟢", "وسيط جيد 𝕺ₙ"),
+    ("💎", "وسيط ممتاز 𝕺ₙ"),
+    ("👑", "وسيط اسطوري 𝕺ₙ"),
+    ("🔥", "وسيط مخضرم 𝕺ₙ"),
+]
+
 SPAM_MAX_MESSAGES = 6
 SPAM_INTERVAL_SECONDS = 8
 SPAM_TIMEOUT_MINUTES = 10
 
 TICKET_AUTO_DELETE_SECONDS = 15 * 60
 TICKET_EXTEND_SECONDS = 15 * 60
+TICKET_REMINDER_SECONDS = 2 * 60
 
 # =========================
 # Database
@@ -76,7 +100,9 @@ unauthorized_attempts = {}
 xp_cooldowns = {}
 spam_tracker = {}
 ticket_delete_tasks = {}
+ticket_reminder_tasks = {}
 
+# ألعاب
 roulette_lobbies = {}
 xo_lobbies = {}
 
@@ -114,22 +140,34 @@ def init_db():
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
-            user_id TEXT PRIMARY KEY,
-            channel_id INTEGER NOT NULL UNIQUE,
+            channel_id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'normal',
+            ticket_type TEXT,
+            target_role TEXT,
             claimed_by TEXT,
-            delete_at REAL
+            claimed_role TEXT,
+            delete_at REAL,
+            reminder_role TEXT
         )
     """)
 
     conn.commit()
 
-    # migration احتياطي
     cur.execute("PRAGMA table_info(tickets)")
     cols = [row["name"] for row in cur.fetchall()]
-    if "claimed_by" not in cols:
-        cur.execute("ALTER TABLE tickets ADD COLUMN claimed_by TEXT")
-    if "delete_at" not in cols:
-        cur.execute("ALTER TABLE tickets ADD COLUMN delete_at REAL")
+    needed = {
+        "kind": "ALTER TABLE tickets ADD COLUMN kind TEXT NOT NULL DEFAULT 'normal'",
+        "ticket_type": "ALTER TABLE tickets ADD COLUMN ticket_type TEXT",
+        "target_role": "ALTER TABLE tickets ADD COLUMN target_role TEXT",
+        "claimed_by": "ALTER TABLE tickets ADD COLUMN claimed_by TEXT",
+        "claimed_role": "ALTER TABLE tickets ADD COLUMN claimed_role TEXT",
+        "delete_at": "ALTER TABLE tickets ADD COLUMN delete_at REAL",
+        "reminder_role": "ALTER TABLE tickets ADD COLUMN reminder_role TEXT",
+    }
+    for col, sql in needed.items():
+        if col not in cols:
+            cur.execute(sql)
 
     conn.commit()
     conn.close()
@@ -188,25 +226,62 @@ def save_user_level_record(user_id: int, xp: int, level: int):
     conn.commit()
     conn.close()
 
-def get_ticket_channel_id(user_id: int):
+def get_open_ticket_channel_id(user_id: int, kind: Optional[str] = None):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT channel_id FROM tickets WHERE user_id = ?", (str(user_id),))
+    if kind:
+        cur.execute(
+            "SELECT channel_id FROM tickets WHERE user_id = ? AND kind = ?",
+            (str(user_id), kind)
+        )
+    else:
+        cur.execute(
+            "SELECT channel_id FROM tickets WHERE user_id = ?",
+            (str(user_id),)
+        )
     row = cur.fetchone()
     conn.close()
     return int(row["channel_id"]) if row else None
 
-def set_ticket_record(user_id: int, channel_id: int, claimed_by=None, delete_at=None):
+def set_ticket_record(
+    channel_id: int,
+    user_id: int,
+    kind: str,
+    ticket_type: str,
+    target_role: Optional[str] = None,
+    claimed_by: Optional[int] = None,
+    claimed_role: Optional[str] = None,
+    delete_at: Optional[float] = None,
+    reminder_role: Optional[str] = None,
+):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO tickets (user_id, channel_id, claimed_by, delete_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            channel_id=excluded.channel_id,
+        INSERT INTO tickets (
+            channel_id, user_id, kind, ticket_type, target_role,
+            claimed_by, claimed_role, delete_at, reminder_role
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(channel_id) DO UPDATE SET
+            user_id=excluded.user_id,
+            kind=excluded.kind,
+            ticket_type=excluded.ticket_type,
+            target_role=excluded.target_role,
             claimed_by=excluded.claimed_by,
-            delete_at=excluded.delete_at
-    """, (str(user_id), int(channel_id), str(claimed_by) if claimed_by else None, float(delete_at) if delete_at else None))
+            claimed_role=excluded.claimed_role,
+            delete_at=excluded.delete_at,
+            reminder_role=excluded.reminder_role
+    """, (
+        int(channel_id),
+        str(user_id),
+        kind,
+        ticket_type,
+        target_role,
+        str(claimed_by) if claimed_by else None,
+        claimed_role,
+        float(delete_at) if delete_at else None,
+        reminder_role
+    ))
     conn.commit()
     conn.close()
 
@@ -218,30 +293,33 @@ def get_ticket_by_channel(channel_id: int):
     conn.close()
     return dict(row) if row else None
 
-def update_ticket_claim(channel_id: int, claimed_by: int | None):
+def update_ticket_claim(channel_id: int, claimed_by: Optional[int], claimed_role: Optional[str] = None):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE tickets SET claimed_by = ? WHERE channel_id = ?",
-        (str(claimed_by) if claimed_by else None, int(channel_id))
+        "UPDATE tickets SET claimed_by = ?, claimed_role = ? WHERE channel_id = ?",
+        (str(claimed_by) if claimed_by else None, claimed_role, int(channel_id))
     )
     conn.commit()
     conn.close()
 
-def update_ticket_delete_at(channel_id: int, delete_at: float):
+def update_ticket_delete_at(channel_id: int, delete_at: Optional[float]):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
         "UPDATE tickets SET delete_at = ? WHERE channel_id = ?",
-        (float(delete_at), int(channel_id))
+        (float(delete_at) if delete_at else None, int(channel_id))
     )
     conn.commit()
     conn.close()
 
-def delete_ticket_record_by_user(user_id: int):
+def update_ticket_target_role(channel_id: int, target_role: Optional[str]):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("DELETE FROM tickets WHERE user_id = ?", (str(user_id),))
+    cur.execute(
+        "UPDATE tickets SET target_role = ?, reminder_role = ? WHERE channel_id = ?",
+        (target_role, target_role, int(channel_id))
+    )
     conn.commit()
     conn.close()
 
@@ -280,6 +358,14 @@ def has_member_role(member: discord.Member) -> bool:
 
 def can_use_member_features(member: discord.Member) -> bool:
     return has_member_role(member) or is_admin_member(member)
+
+def get_role_mentions(guild: discord.Guild, role_names):
+    mentions = []
+    for role_name in role_names:
+        role = discord.utils.get(guild.roles, name=role_name)
+        if role:
+            mentions.append(role.mention)
+    return mentions
 
 async def count_unauthorized_attempt(ctx):
     uid = str(ctx.author.id)
@@ -323,14 +409,6 @@ def parse_duration(text: str):
             return timedelta(hours=hours)
     except ValueError:
         return None
-    return None
-
-def get_ticket_owner_id_from_topic(topic: str):
-    if not topic:
-        return None
-    match = re.search(r"owner_id:(\d+)", topic)
-    if match:
-        return int(match.group(1))
     return None
 
 async def can_manage_target(ctx, member: discord.Member):
@@ -429,17 +507,23 @@ def make_warn_embed(ctx, member: discord.Member, reason: str, count: int):
     )
     return embed
 
-def make_ticket_embed(guild: discord.Guild, opener: discord.Member, ticket_type: str, claimed=False, delete_at_ts=None):
-    left_text = "غير مستلمة"
+def make_ticket_embed(guild: discord.Guild, opener: discord.Member, ticket_type: str, claimed=False, delete_at_ts=None, mediator_role=None, auto_delete=True):
+    state_text = "غير مستلمة"
     if claimed:
-        left_text = "تم استلامها"
+        state_text = "تم استلامها"
 
-    delete_line = ""
-    if delete_at_ts:
+    extra = ""
+    if mediator_role:
+        extra += f"\n🎯 نوع الوسيط المطلوب: **{mediator_role}**"
+
+    if auto_delete and delete_at_ts:
         remaining = max(0, int(delete_at_ts - time.time()))
         minutes = remaining // 60
         seconds = remaining % 60
-        delete_line = f"\n⏳ الحذف التلقائي بعد: {minutes}د {seconds}ث"
+        extra += f"\n⏳ الحذف التلقائي بعد: {minutes}د {seconds}ث"
+
+    if not auto_delete:
+        extra += "\n🛑 لا يوجد حذف تلقائي لهذه التذكرة."
 
     embed = discord.Embed(
         title=f"🎫 تذكرة جديدة - {ticket_type}",
@@ -447,7 +531,7 @@ def make_ticket_embed(guild: discord.Guild, opener: discord.Member, ticket_type:
             f"مرحبًا {opener.mention}\n"
             f"تم فتح التذكرة بنجاح.\n"
             f"يرجى شرح مشكلتك أو طلبك بوضوح.\n"
-            f"📌 حالة التذكرة: **{left_text}**{delete_line}"
+            f"📌 حالة التذكرة: **{state_text}**{extra}"
         ),
         color=discord.Color.dark_red()
     )
@@ -456,6 +540,28 @@ def make_ticket_embed(guild: discord.Guild, opener: discord.Member, ticket_type:
     embed.add_field(name="صاحب التذكرة", value=opener.mention, inline=True)
     embed.add_field(name="النوع", value=ticket_type, inline=True)
     embed.set_footer(text=guild.name)
+    return embed
+
+def make_mediator_panel_embed(guild: discord.Guild):
+    embed = discord.Embed(
+        title="🎫 تكت الوسيط",
+        description=(
+            "**تعليمات مهمة**\n"
+            "• ممنوع فتح التكت للعب أو الهزار.\n"
+            "• ممنوع فتح التكت بدون سبب واضح.\n"
+            "• أي عبث أو استغلال خاطئ قد يسبب تحذير أو عقوبة.\n"
+            "• اختر نوع الوسيط المناسب من القائمة بالأسفل.\n\n"
+            "**أنواع الوسطاء المتاحة**\n"
+            "🥉 وسيط مبتدئ 𝕺ₙ\n"
+            "🟢 وسيط جيد 𝕺ₙ\n"
+            "💎 وسيط ممتاز 𝕺ₙ\n"
+            "👑 وسيط اسطوري 𝕺ₙ\n"
+            "🔥 وسيط مخضرم 𝕺ₙ"
+        ),
+        color=discord.Color.dark_gold()
+    )
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
     return embed
 
 def make_levelup_embed(member: discord.Member, new_level: int):
@@ -488,7 +594,7 @@ def make_welcome_embed(member: discord.Member, rules_channel):
     return embed
 
 # =========================
-# Ticket delete scheduling
+# Ticket scheduling
 # =========================
 async def ticket_auto_delete_task(channel_id: int, delete_at: float):
     wait_seconds = max(0, delete_at - time.time())
@@ -509,6 +615,9 @@ async def ticket_auto_delete_task(channel_id: int, delete_at: float):
 
     delete_ticket_record_by_channel(int(channel_id))
     ticket_delete_tasks.pop(int(channel_id), None)
+    task = ticket_reminder_tasks.pop(int(channel_id), None)
+    if task:
+        task.cancel()
 
 def schedule_ticket_delete(channel_id: int, delete_at: float):
     channel_id = int(channel_id)
@@ -518,6 +627,55 @@ def schedule_ticket_delete(channel_id: int, delete_at: float):
     ticket_delete_tasks[channel_id] = asyncio.create_task(
         ticket_auto_delete_task(channel_id, delete_at)
     )
+
+async def ticket_reminder_loop(channel_id: int):
+    while True:
+        await asyncio.sleep(TICKET_REMINDER_SECONDS)
+        ticket = get_ticket_by_channel(channel_id)
+        if not ticket:
+            break
+        if ticket.get("claimed_by"):
+            break
+
+        channel = bot.get_channel(int(channel_id))
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(int(channel_id))
+            except Exception:
+                channel = None
+
+        if channel is None:
+            break
+
+        role_name = ticket.get("reminder_role")
+        if not role_name:
+            continue
+
+        role = discord.utils.get(channel.guild.roles, name=role_name)
+        if role:
+            try:
+                await channel.send(
+                    f"{role.mention} ⏰ تذكير: توجد تذكرة بانتظار الاستلام.",
+                    allowed_mentions=discord.AllowedMentions(roles=True)
+                )
+            except Exception:
+                pass
+
+    ticket_reminder_tasks.pop(int(channel_id), None)
+
+def schedule_ticket_reminder(channel_id: int):
+    channel_id = int(channel_id)
+    old = ticket_reminder_tasks.get(channel_id)
+    if old:
+        old.cancel()
+    ticket_reminder_tasks[channel_id] = asyncio.create_task(
+        ticket_reminder_loop(channel_id)
+    )
+
+def stop_ticket_reminder(channel_id: int):
+    task = ticket_reminder_tasks.pop(int(channel_id), None)
+    if task:
+        task.cancel()
 
 # =========================
 # Games
@@ -550,7 +708,11 @@ class GamesMenuView(discord.ui.View):
             return
         lobby = RouletteLobbyView(interaction.user.id)
         embed = lobby.build_embed(interaction.guild)
-        await interaction.response.send_message(embed=embed, view=lobby)
+        msg = await interaction.response.send_message(embed=embed, view=lobby)
+        try:
+            lobby.message = await interaction.original_response()
+        except Exception:
+            pass
 
     @discord.ui.button(label="XO", style=discord.ButtonStyle.success, emoji="❎")
     async def open_xo(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -559,6 +721,10 @@ class GamesMenuView(discord.ui.View):
         lobby = XOLobbyView(interaction.user.id)
         embed = lobby.build_embed(interaction.guild)
         await interaction.response.send_message(embed=embed, view=lobby)
+        try:
+            lobby.message = await interaction.original_response()
+        except Exception:
+            pass
 
     @discord.ui.button(label="قريبًا", style=discord.ButtonStyle.secondary, emoji="🕹️")
     async def soon(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -756,8 +922,8 @@ class XOLobbyView(discord.ui.View):
             try:
                 if self.message:
                     await self.message.edit(view=None)
-            except Exception:
-                pass
+                except Exception:
+                    pass
             return
 
         await interaction.response.defer()
@@ -775,6 +941,91 @@ class XOLobbyView(discord.ui.View):
 # =========================
 # Views التكت
 # =========================
+class ChangeMediatorTypeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.select(
+        placeholder="اختر نوع وسيط آخر أو الكل",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label=label, emoji=emoji, value=label)
+            for emoji, label in MEDIATOR_ROLE_OPTIONS
+        ] + [discord.SelectOption(label="الكل", emoji="📢", value="الكل")]
+    )
+    async def change_type(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not isinstance(interaction.user, discord.Member):
+            return
+
+        ticket = get_ticket_by_channel(interaction.channel.id)
+        if not ticket:
+            await interaction.response.send_message("❌ التذكرة غير موجودة.", ephemeral=True)
+            return
+
+        if str(interaction.user.id) != str(ticket["user_id"]):
+            await interaction.response.send_message("❌ فقط صاحب التذكرة يقدر يغير نوع الوسيط.", ephemeral=True)
+            return
+
+        if ticket.get("claimed_by"):
+            await interaction.response.send_message("❌ لا يمكن تغيير نوع الوسيط بعد الاستلام.", ephemeral=True)
+            return
+
+        new_role_name = select.values[0]
+        guild = interaction.guild
+        channel = interaction.channel
+
+        # تنظيف صلاحيات الوسطاء القديمة
+        for _, role_name in MEDIATOR_ROLE_OPTIONS:
+            role = discord.utils.get(guild.roles, name=role_name)
+            if role:
+                await channel.set_permissions(role, overwrite=None)
+
+        if new_role_name != "الكل":
+            selected_role = discord.utils.get(guild.roles, name=new_role_name)
+            if not selected_role:
+                await interaction.response.send_message("❌ الرتبة المختارة غير موجودة.", ephemeral=True)
+                return
+            await channel.set_permissions(
+                selected_role,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+            reminder_role = new_role_name
+            mention_text = selected_role.mention
+        else:
+            for _, role_name in MEDIATOR_ROLE_OPTIONS:
+                role = discord.utils.get(guild.roles, name=role_name)
+                if role:
+                    await channel.set_permissions(
+                        role,
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True
+                    )
+            reminder_role = None
+            mention_text = "📢 جميع الوسطاء"
+
+        update_ticket_target_role(channel.id, new_role_name if new_role_name != "الكل" else "الكل")
+
+        stop_ticket_reminder(channel.id)
+        if reminder_role:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE tickets SET reminder_role = ? WHERE channel_id = ?",
+                (reminder_role, int(channel.id))
+            )
+            conn.commit()
+            conn.close()
+            schedule_ticket_reminder(channel.id)
+
+        await interaction.response.send_message(
+            f"✅ تم تغيير نوع الوسيط إلى: **{new_role_name}**\n{mention_text}",
+            allowed_mentions=discord.AllowedMentions(roles=True)
+        )
+
 class TicketManageView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -785,24 +1036,68 @@ class TicketManageView(discord.ui.View):
             await interaction.response.send_message("❌ غير متاح.", ephemeral=True)
             return
 
-        if not is_ticket_staff(interaction.user):
-            await interaction.response.send_message("❌ مش عندك إذن.", ephemeral=True)
-            return
-
         ticket = get_ticket_by_channel(interaction.channel.id)
         if not ticket:
             await interaction.response.send_message("❌ بيانات التكت غير موجودة.", ephemeral=True)
+            return
+
+        kind = ticket.get("kind", "normal")
+
+        if kind == "normal":
+            if not is_ticket_staff(interaction.user):
+                await interaction.response.send_message("❌ مش عندك إذن.", ephemeral=True)
+                return
+
+            if ticket.get("claimed_by"):
+                await interaction.response.send_message("❌ التكت مستلمة بالفعل.", ephemeral=True)
+                return
+
+            update_ticket_claim(interaction.channel.id, interaction.user.id, "staff")
+            stop_ticket_reminder(interaction.channel.id)
+
+            embed = discord.Embed(
+                description=(
+                    f"✅ الإداري {interaction.user.mention} استلم التذكرة.\n"
+                    f"اتفضل اشرح مشكلتك أو طلبك."
+                ),
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+            return
+
+        # mediator
+        target_role_name = ticket.get("target_role")
+        if target_role_name == "الكل":
+            allowed = is_admin_member(interaction.user) or any(
+                role.name in [name for _, name in MEDIATOR_ROLE_OPTIONS]
+                for role in interaction.user.roles
+            )
+        else:
+            allowed = is_admin_member(interaction.user) or any(role.name == target_role_name for role in interaction.user.roles)
+
+        if not allowed:
+            await interaction.response.send_message("❌ مش عندك إذن لاستلام هذا التكت.", ephemeral=True)
             return
 
         if ticket.get("claimed_by"):
             await interaction.response.send_message("❌ التكت مستلمة بالفعل.", ephemeral=True)
             return
 
-        update_ticket_claim(interaction.channel.id, interaction.user.id)
+        claimed_role = None
+        if not is_admin_member(interaction.user):
+            for role in interaction.user.roles:
+                if role.name == target_role_name or target_role_name == "الكل":
+                    if any(role.name == name for _, name in MEDIATOR_ROLE_OPTIONS):
+                        claimed_role = role.name
+                        break
+
+        update_ticket_claim(interaction.channel.id, interaction.user.id, claimed_role or target_role_name)
+        stop_ticket_reminder(interaction.channel.id)
+
         embed = discord.Embed(
             description=(
-                f"✅ الإداري {interaction.user.mention} استلم التذكرة.\n"
-                f"اتفضل اشرح مشكلتك أو طلبك."
+                f"✅ الوسيط {interaction.user.mention} استلم التذكرة.\n"
+                f"اتفضل اشرح طلبك."
             ),
             color=discord.Color.green()
         )
@@ -813,13 +1108,17 @@ class TicketManageView(discord.ui.View):
         if not isinstance(interaction.user, discord.Member):
             return
 
-        if not is_ticket_staff(interaction.user):
-            await interaction.response.send_message("❌ مش عندك إذن.", ephemeral=True)
-            return
-
         ticket = get_ticket_by_channel(interaction.channel.id)
         if not ticket:
             await interaction.response.send_message("❌ بيانات التكت غير موجودة.", ephemeral=True)
+            return
+
+        if ticket.get("kind") != "normal":
+            await interaction.response.send_message("❌ الأمر ده للتكت العادي فقط.", ephemeral=True)
+            return
+
+        if not is_ticket_staff(interaction.user):
+            await interaction.response.send_message("❌ مش عندك إذن.", ephemeral=True)
             return
 
         current_delete_at = float(ticket["delete_at"] or time.time())
@@ -828,6 +1127,26 @@ class TicketManageView(discord.ui.View):
         schedule_ticket_delete(interaction.channel.id, new_delete_at)
 
         await interaction.response.send_message("✅ تم تمديد التكت 15 دقيقة.")
+
+    @discord.ui.button(label="طلب تغيير نوع الوسيط", style=discord.ButtonStyle.secondary, emoji="🔄", custom_id="mediator_change_request")
+    async def request_change_mediator(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member):
+            return
+
+        ticket = get_ticket_by_channel(interaction.channel.id)
+        if not ticket or ticket.get("kind") != "mediator":
+            await interaction.response.send_message("❌ هذا الزر لتكت الوسيط فقط.", ephemeral=True)
+            return
+
+        if str(interaction.user.id) != str(ticket["user_id"]):
+            await interaction.response.send_message("❌ فقط صاحب التذكرة يقدر يستخدم الزر.", ephemeral=True)
+            return
+
+        if ticket.get("claimed_by"):
+            await interaction.response.send_message("❌ لا يمكن تغيير نوع الوسيط بعد الاستلام.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("اختر نوع الوسيط الجديد:", view=ChangeMediatorTypeView(), ephemeral=True)
 
     @discord.ui.button(label="قفل التكت", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="ticket_close")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -842,19 +1161,33 @@ class TicketManageView(discord.ui.View):
 
         owner_id = int(ticket["user_id"])
         claimed_by = ticket.get("claimed_by")
+        kind = ticket.get("kind", "normal")
 
         can_close = False
 
-        if is_ticket_staff(interaction.user):
-            can_close = True
-        elif interaction.user.id == owner_id and not claimed_by:
-            can_close = True
+        if kind == "normal":
+            if is_ticket_staff(interaction.user):
+                can_close = True
+            elif interaction.user.id == owner_id and not claimed_by:
+                can_close = True
+        else:
+            # mediator
+            if interaction.user.id == owner_id and not claimed_by:
+                can_close = True
+            elif claimed_by and str(interaction.user.id) == str(claimed_by):
+                can_close = True
 
         if not can_close:
-            await interaction.response.send_message(
-                "❌ لا يمكنك قفل التذكرة بعد استلام الإداري لها.",
-                ephemeral=True
-            )
+            if kind == "mediator":
+                await interaction.response.send_message(
+                    "❌ بعد استلام تكت الوسيط، الوسيط المستلم فقط هو اللي يقدر يقفله.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ لا يمكنك قفل التذكرة بعد استلام الإداري لها.",
+                    ephemeral=True
+                )
             return
 
         await interaction.response.send_message("🔒 سيتم إغلاق التذكرة بعد 5 ثوانٍ.")
@@ -868,6 +1201,7 @@ class TicketManageView(discord.ui.View):
             pass
 
         try:
+            stop_ticket_reminder(interaction.channel.id)
             delete_ticket_record_by_channel(interaction.channel.id)
             await interaction.channel.delete(reason=f"Ticket closed by {interaction.user}")
         except Exception:
@@ -892,17 +1226,17 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.send_message("❌ ليس لديك إذن لفتح تكت.", ephemeral=True)
             return
 
-        existing_channel_id = get_ticket_channel_id(member.id)
+        existing_channel_id = get_open_ticket_channel_id(member.id, "normal")
         if existing_channel_id:
             ch = guild.get_channel(existing_channel_id)
             if ch:
                 await interaction.response.send_message(
-                    f"❌ لديك تذكرة مفتوحة بالفعل: {ch.mention}",
+                    f"❌ لديك تذكرة عادية مفتوحة بالفعل: {ch.mention}",
                     ephemeral=True
                 )
                 return
             else:
-                delete_ticket_record_by_user(member.id)
+                delete_ticket_record_by_channel(existing_channel_id)
 
         category = discord.utils.get(guild.categories, name=TICKET_CATEGORY_NAME)
         if category is None:
@@ -925,15 +1259,9 @@ class TicketPanelView(discord.ui.View):
             ),
         }
 
-        ticket_staff_role = discord.utils.get(guild.roles, name=TICKET_STAFF_ROLE)
-        if ticket_staff_role:
-            overwrites[ticket_staff_role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            )
-
-        for role_name in ALLOWED_ADMIN_ROLES:
+        # المسؤولين العاديين
+        base_ticket_roles = [TICKET_STAFF_ROLE] + EXTRA_NORMAL_TICKET_MENTION_ROLES
+        for role_name in base_ticket_roles + ALLOWED_ADMIN_ROLES:
             role = discord.utils.get(guild.roles, name=role_name)
             if role:
                 overwrites[role] = discord.PermissionOverwrite(
@@ -951,12 +1279,38 @@ class TicketPanelView(discord.ui.View):
         )
 
         delete_at = time.time() + TICKET_AUTO_DELETE_SECONDS
-        set_ticket_record(member.id, channel.id, claimed_by=None, delete_at=delete_at)
+        set_ticket_record(
+            channel_id=channel.id,
+            user_id=member.id,
+            kind="normal",
+            ticket_type=ticket_type,
+            target_role=None,
+            claimed_by=None,
+            claimed_role=None,
+            delete_at=delete_at,
+            reminder_role=TICKET_STAFF_ROLE
+        )
         schedule_ticket_delete(channel.id, delete_at)
+        schedule_ticket_reminder(channel.id)
 
-        embed = make_ticket_embed(guild, member, ticket_type, claimed=False, delete_at_ts=delete_at)
+        embed = make_ticket_embed(
+            guild,
+            member,
+            ticket_type,
+            claimed=False,
+            delete_at_ts=delete_at,
+            auto_delete=True
+        )
         manage_view = TicketManageView()
-        await channel.send(content=f"{member.mention}", embed=embed, view=manage_view)
+
+        mentions = get_role_mentions(guild, [TICKET_STAFF_ROLE] + EXTRA_NORMAL_TICKET_MENTION_ROLES)
+        mention_text = " ".join(mentions) if mentions else ""
+        await channel.send(
+            content=f"{member.mention} {mention_text}".strip(),
+            embed=embed,
+            view=manage_view,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True)
+        )
 
         await interaction.response.send_message(
             f"✅ تم فتح التذكرة: {channel.mention}",
@@ -975,6 +1329,136 @@ class TicketPanelView(discord.ui.View):
     async def refresh_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("✅ تم تحديث الخيارات.", ephemeral=True)
 
+class MediatorSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=label, emoji=emoji, value=label)
+            for emoji, label in MEDIATOR_ROLE_OPTIONS
+        ]
+        super().__init__(
+            placeholder="اختر نوع الوسيط المطلوب",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member):
+            return
+
+        member = interaction.user
+        guild = interaction.guild
+        selected_role_name = self.values[0]
+
+        if not can_use_member_features(member):
+            await interaction.response.send_message("❌ ليس لديك إذن لفتح تكت وسيط.", ephemeral=True)
+            return
+
+        existing_channel_id = get_open_ticket_channel_id(member.id, "mediator")
+        if existing_channel_id:
+            ch = guild.get_channel(existing_channel_id)
+            if ch:
+                await interaction.response.send_message(
+                    f"❌ لديك تذكرة وسيط مفتوحة بالفعل: {ch.mention}",
+                    ephemeral=True
+                )
+                return
+            else:
+                delete_ticket_record_by_channel(existing_channel_id)
+
+        selected_role = discord.utils.get(guild.roles, name=selected_role_name)
+        if not selected_role:
+            await interaction.response.send_message("❌ رتبة الوسيط غير موجودة في السيرفر.", ephemeral=True)
+            return
+
+        category = discord.utils.get(guild.categories, name=MEDIATOR_TICKET_CATEGORY_NAME)
+        if category is None:
+            category = await guild.create_category(MEDIATOR_TICKET_CATEGORY_NAME)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            member: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                manage_channels=True,
+                read_message_history=True
+            ),
+            selected_role: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+        }
+
+        for role_name in ALLOWED_ADMIN_ROLES + EXTRA_MEDIATOR_WATCH_ROLES:
+            role = discord.utils.get(guild.roles, name=role_name)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True
+                )
+
+        channel_name = f"mediator-{sanitize_channel_name(member.name)}"
+        channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            topic=f"owner_id:{member.id} | type:وسيط"
+        )
+
+        set_ticket_record(
+            channel_id=channel.id,
+            user_id=member.id,
+            kind="mediator",
+            ticket_type="وسيط",
+            target_role=selected_role_name,
+            claimed_by=None,
+            claimed_role=None,
+            delete_at=None,
+            reminder_role=selected_role_name
+        )
+        schedule_ticket_reminder(channel.id)
+
+        embed = make_ticket_embed(
+            guild,
+            member,
+            "وسيط",
+            claimed=False,
+            delete_at_ts=None,
+            mediator_role=selected_role_name,
+            auto_delete=False
+        )
+
+        manage_view = TicketManageView()
+        await channel.send(
+            content=(
+                f"{member.mention}\n"
+                f"{selected_role.mention}\n"
+                "⚠️ ممنوع فتح التذكرة للعب أو الهزار أو بدون سبب واضح."
+            ),
+            embed=embed,
+            view=manage_view,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True)
+        )
+
+        await interaction.response.send_message(
+            f"✅ تم فتح تكت الوسيط: {channel.mention}",
+            ephemeral=True
+        )
+
+class MediatorTicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(MediatorSelect())
+
 # =========================
 # Events
 # =========================
@@ -983,12 +1467,16 @@ async def on_ready():
     init_db()
     bot.add_view(TicketPanelView())
     bot.add_view(TicketManageView())
+    bot.add_view(MediatorTicketPanelView())
+    bot.add_view(ChangeMediatorTypeView())
 
     for ticket in get_all_tickets():
-        if ticket.get("delete_at"):
+        if ticket.get("kind") == "normal" and ticket.get("delete_at"):
             schedule_ticket_delete(int(ticket["channel_id"]), float(ticket["delete_at"]))
+        if not ticket.get("claimed_by") and ticket.get("reminder_role"):
+            schedule_ticket_reminder(int(ticket["channel_id"]))
 
-    print("✅ VERSION FINAL")
+    print("✅ VERSION FINAL MEDIATOR")
     print(f"البوت شغال كـ {bot.user}")
 
 @bot.event
@@ -1026,7 +1514,6 @@ async def on_message(message: discord.Message):
 
     content = message.content.strip()
 
-    # ردود ثابتة
     if content == "السلام عليكم":
         await message.channel.send("وعليكم السلام ورحمة الله وبركاته")
         return
@@ -1035,7 +1522,6 @@ async def on_message(message: discord.Message):
         await message.channel.send("شيلها يا حبيبي")
         return
 
-    # خط
     if content == LINE_TRIGGER:
         if is_admin_member(message.author):
             try:
@@ -1045,7 +1531,6 @@ async def on_message(message: discord.Message):
             await send_line_image(message.channel)
         return
 
-    # منشن
     if content == "منشن":
         if is_admin_member(message.author):
             try:
@@ -1058,7 +1543,6 @@ async def on_message(message: discord.Message):
             )
         return
 
-    # منيو الألعاب
     if content in ["-العاب", ".العاب"]:
         if can_use_member_features(message.author):
             view = GamesMenuView()
@@ -1090,7 +1574,7 @@ async def on_message(message: discord.Message):
                 print(f"Spam timeout error: {e}")
         return
 
-    # XP للرسائل العادية فقط
+    # XP
     if not content.startswith(".") and not content.startswith("-") and content:
         last_time = xp_cooldowns.get(uid, 0)
 
@@ -1135,7 +1619,6 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_command_error(ctx, error):
-    # الأعضاء العاديين: البوت ما يردش عليهم
     if not is_admin_member(ctx.author):
         return
 
@@ -1152,13 +1635,11 @@ async def on_command_error(ctx, error):
         elif ctx.command and ctx.command.name == "حذف":
             msg = "❌ استخدم: `.حذف 10`"
         elif ctx.command and ctx.command.name == "مد":
-            msg = "❌ استخدم: `.مد` داخل التكت"
+            msg = "❌ استخدم: `.مد` داخل التكت العادي"
         else:
             msg = "❌ ناقص جزء في الأمر."
-
     elif isinstance(error, commands.BadArgument):
         msg = "❌ فيه خطأ في كتابة الأمر أو المنشن."
-
     elif isinstance(error, commands.CheckFailure):
         return
 
@@ -1330,6 +1811,10 @@ async def extend_ticket_command(ctx):
         await admin_dm_or_temp(ctx.author, "❌ استخدم الأمر داخل التكت فقط.")
         return
 
+    if ticket.get("kind") != "normal":
+        await admin_dm_or_temp(ctx.author, "❌ الأمر ده للتكت العادي فقط.")
+        return
+
     current_delete_at = float(ticket["delete_at"] or time.time())
     new_delete_at = current_delete_at + TICKET_EXTEND_SECONDS
     update_ticket_delete_at(ctx.channel.id, new_delete_at)
@@ -1342,7 +1827,6 @@ async def extend_ticket_command(ctx):
 # =========================
 @bot.command(name="لفل")
 async def level_command(ctx, member: discord.Member = None):
-    # الأعضاء فقط في روم الأوامر
     if not is_admin_member(ctx.author) and ctx.channel.name != COMMANDS_CHANNEL_NAME:
         return
 
@@ -1399,6 +1883,16 @@ async def send_ticket_panel_command(ctx):
         embed.set_thumbnail(url=ctx.guild.icon.url)
 
     view = TicketPanelView()
+    await ctx.send(embed=embed, view=view)
+
+@bot.command(name="تكت-وسيط")
+async def send_mediator_ticket_panel(ctx):
+    if not is_admin_member(ctx.author):
+        await count_unauthorized_attempt(ctx)
+        return
+
+    embed = make_mediator_panel_embed(ctx.guild)
+    view = MediatorTicketPanelView()
     await ctx.send(embed=embed, view=view)
 
 @bot.command(name="تيست")
