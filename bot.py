@@ -54,7 +54,6 @@ BAD_WORDS = [
     "كسم", "شرموط", "عرص", "خول", "متناك", "ابن الكلب", "ياكلخ", "منيوك"
 ]
 
-# رتب المستوى
 LEVEL_ROLES = {
     3: "👥 𝕸𝖇 ❁ 𝓼𝓲𝓵𝓿𝓮𝓻",
     6: "👥 𝕸𝖇 ❁ 𝓰𝓸𝓵𝓭",
@@ -514,36 +513,6 @@ async def on_message(message: discord.Message):
         return
 
     # خط
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot or message.guild is None:
-        return
-
-    content = message.content.strip()
-
-    # فلتر الشتائم
-    for word in BAD_WORDS:
-        if word in content:
-            try:
-                await message.delete()
-                await message.channel.send(
-                    f"❌ ممنوع استعمال كلمات نابية يا {message.author.mention}",
-                    delete_after=5
-                )
-            except Exception:
-                pass
-            return
-
-    # ردود ثابتة
-    if content == "السلام عليكم":
-        await message.channel.send("وعليكم السلام ورحمة الله وبركاته")
-        return
-
-    if content == ".":
-        await message.channel.send("شيلها يا حبيبي")
-        return
-
-    # خط
     if content == LINE_TRIGGER:
         if is_admin_member(message.author):
             try:
@@ -560,116 +529,63 @@ async def on_message(message: discord.Message):
                 await message.delete()
             except Exception:
                 pass
-
             await message.channel.send(
                 "@everyone @here",
                 allowed_mentions=discord.AllowedMentions(everyone=True)
             )
         return
 
-    # XP
-    now = time.time()
-    uid = str(message.author.id)
-    last_time = xp_cooldowns.get(uid, 0)
+    # لا تحتسب XP للأوامر المعروفة
+    known_commands = {
+        "ت", "تحذيرات", "اعفاء", "تايم", "فك", "ق", "ف", "انطر", "تفو",
+        "حذف", "لفل", "روليت", "كراسي", "دخول", "ابدأ_كراسي", "اكس",
+        "لعب", "الغاء_اكس", "ارسلتكت"
+    }
+    first_word = content.split(" ")[0] if content else ""
+    is_command_like = first_word in known_commands
 
-    if now - last_time >= 45:
-        xp_cooldowns[uid] = now
+    # XP للرسائل العادية فقط
+    if not is_command_like and content:
+        now = time.time()
+        uid = str(message.author.id)
+        last_time = xp_cooldowns.get(uid, 0)
 
-        record = get_user_level_record(message.author.id)
-        old_level = record["level"]
+        if now - last_time >= 45:
+            xp_cooldowns[uid] = now
 
-        gained_xp = random.randint(8, 15)
-        record["xp"] += gained_xp
-        new_level = level_from_xp(record["xp"])
-        record["level"] = new_level
-        save_levels()
+            record = get_user_level_record(message.author.id)
+            old_level = record["level"]
 
-        if new_level > old_level:
-            level_channel = message.guild.get_channel(LEVEL_CHANNEL_ID)
-            if level_channel:
-                embed = make_levelup_embed(message.author, new_level)
-                await level_channel.send(embed=embed)
+            gained_xp = random.randint(8, 15)
+            record["xp"] += gained_xp
+            new_level = level_from_xp(record["xp"])
+            record["level"] = new_level
+            save_levels()
 
-            guild_roles_to_manage = [role_name for role_name in LEVEL_ROLES.values()]
-            roles_to_remove = [discord.utils.get(message.guild.roles, name=r) for r in guild_roles_to_manage]
-            roles_to_remove = [r for r in roles_to_remove if r is not None]
+            if new_level > old_level:
+                level_channel = message.guild.get_channel(LEVEL_CHANNEL_ID)
+                if level_channel:
+                    embed = make_levelup_embed(message.author, new_level)
+                    await level_channel.send(embed=embed)
 
-            highest_role_name = None
-            for lvl, role_name in sorted(LEVEL_ROLES.items()):
-                if new_level >= lvl:
-                    highest_role_name = role_name
+                guild_roles_to_manage = [role_name for role_name in LEVEL_ROLES.values()]
+                roles_to_remove = [discord.utils.get(message.guild.roles, name=r) for r in guild_roles_to_manage]
+                roles_to_remove = [r for r in roles_to_remove if r is not None]
 
-            role_to_add = discord.utils.get(message.guild.roles, name=highest_role_name) if highest_role_name else None
+                highest_role_name = None
+                for lvl, role_name in sorted(LEVEL_ROLES.items()):
+                    if new_level >= lvl:
+                        highest_role_name = role_name
 
-            try:
-                if roles_to_remove:
-                    await message.author.remove_roles(*roles_to_remove, reason="Level role update")
-                if role_to_add:
-                    await message.author.add_roles(role_to_add, reason="Level up reward")
-            except Exception:
-                pass
+                role_to_add = discord.utils.get(message.guild.roles, name=highest_role_name) if highest_role_name else None
 
-    await bot.process_commands(message)
-
-    # منشن البوت من إداري
-# أمر منشن
-if content == "منشن":
-    if is_admin_member(message.author):
-        try:
-            await message.delete()
-        except Exception:
-            pass
-
-        await message.channel.send(
-            "@everyone @here",
-            allowed_mentions=discord.AllowedMentions(everyone=True)
-        )
-    return
-
-    # XP
-    if not content.startswith(""):
-        pass
-
-    now = time.time()
-    uid = str(message.author.id)
-    last_time = xp_cooldowns.get(uid, 0)
-
-    if now - last_time >= 45:
-        xp_cooldowns[uid] = now
-
-        record = get_user_level_record(message.author.id)
-        old_level = record["level"]
-
-        gained_xp = random.randint(8, 15)
-        record["xp"] += gained_xp
-        new_level = level_from_xp(record["xp"])
-        record["level"] = new_level
-        save_levels()
-
-        if new_level > old_level:
-            level_channel = message.guild.get_channel(LEVEL_CHANNEL_ID)
-            if level_channel:
-                embed = make_levelup_embed(message.author, new_level)
-                await level_channel.send(embed=embed)
-
-            guild_roles_to_manage = [role_name for role_name in LEVEL_ROLES.values()]
-            roles_to_remove = [discord.utils.get(message.guild.roles, name=r) for r in guild_roles_to_manage]
-            roles_to_remove = [r for r in roles_to_remove if r is not None]
-
-            highest_role_name = None
-            for lvl, role_name in sorted(LEVEL_ROLES.items()):
-                if new_level >= lvl:
-                    highest_role_name = role_name
-
-            role_to_add = discord.utils.get(message.guild.roles, name=highest_role_name) if highest_role_name else None
-
-            try:
-                if roles_to_remove:
-                    await message.author.remove_roles(*roles_to_remove, reason="Level role update")
-                if role_to_add:
-                    await message.author.add_roles(role_to_add, reason="Level up reward")
-            except Exception:
-                pass
+                try:
+                    if roles_to_remove:
+                        await message.author.remove_roles(*roles_to_remove, reason="Level role update")
+                    if role_to_add:
+                        await message.author.add_roles(role_to_add, reason="Level up reward")
+                except Exception:
+                    pass
 
     await bot.process_commands(message)
 
@@ -1080,7 +996,4 @@ if __name__ == "__main__":
     if token:
         bot.run(token)
     else:
-
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
-
-
