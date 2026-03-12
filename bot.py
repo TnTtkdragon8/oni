@@ -922,7 +922,7 @@ class XOLobbyView(discord.ui.View):
             try:
                 if self.message:
                     await self.message.edit(view=None)
-                except Exception:
+            except Exception:
                     pass
             return
 
@@ -1908,3 +1908,4 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
