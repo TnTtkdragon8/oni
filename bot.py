@@ -50,9 +50,6 @@ ECONOMY_CHANNEL_NAME = "ア・「🤖」أوامــر"
 GAMES_CHANNEL_NAME = "モ・「🎉」الــفــعــالــيــات"
 TICKET_CATEGORY_NAME = "🎫 Tickets"
 
-BAD_WORDS = [
-    ""
-]
 
 # رتب المستوى
 LEVEL_ROLES = {
@@ -536,18 +533,6 @@ async def on_message(message: discord.Message):
 
     content = message.content.strip()
 
-    # فلتر الشتائم
-    for word in BAD_WORDS:
-        if word in content:
-            try:
-                await message.delete()
-                await message.channel.send(
-                    f"❌ ممنوع استعمال كلمات نابية يا {message.author.mention}",
-                    delete_after=5
-                )
-            except Exception:
-                pass
-            return
 
     # ردود ثابتة
     if content == "السلام عليكم":
@@ -1134,4 +1119,5 @@ if __name__ == "__main__":
     else:
 
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
 
