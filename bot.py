@@ -1110,6 +1110,9 @@ async def send_ticket_panel_command(ctx):
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
 
+@bot.command(name="تيست")
+async def test_command(ctx):
+    await ctx.send("شغال")
 # =========================
 # تشغيل
 # =========================
@@ -1120,6 +1123,7 @@ if __name__ == "__main__":
     else:
 
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
 
 
 
