@@ -460,6 +460,7 @@ async def handle_level_xp(message: discord.Message):
                 f"تم ترقية مستواك إلى **لفل {new_level}**\n"
                 f"شد حيلك عشان توصل **لفل {new_level + 1}**"
             )
+            await send_line_image(level_channel
 
         await update_member_level_roles(message.author, new_level)
 
@@ -2034,3 +2035,4 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
