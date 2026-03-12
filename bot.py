@@ -32,7 +32,7 @@ bot = commands.Bot(command_prefix=".", intents=intents)
 # =========================
 OWNER_USERNAME = "xjb5"
 
-WELCOME_CHANNEL_NAME = "الترحيب"
+WELCOME_CHANNEL_NAME = "اモ・「👋」الـتـرحـيـب"
 WELCOME_BG_URL = "https://i.postimg.cc/xjvBZgKQ/khlfyt.jpg"
 
 LINE_TRIGGER = "خط"
@@ -903,3 +903,4 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
