@@ -26,7 +26,7 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix=".", intents=intents)
+bot = commands.Bot(command_prefix=[".", "-"], intents=intents)
 
 # =========================
 # إعدادات عامة
@@ -36,7 +36,6 @@ OWNER_USERNAME = "xjb5"
 WELCOME_CHANNEL_NAME = "モ・「👋」الـتـرحـيـب"
 RULES_CHANNEL_NAME = "モ・「⚖️」الـقـوانـيـن"
 WELCOME_BG_URL = "https://i.postimg.cc/xjvBZgKQ/khlfyt.jpg"
-
 
 LINE_TRIGGER = "خط"
 LINE_IMAGE_SOURCE = "https://i.postimg.cc/PrQHV52P/khtt.png"
@@ -73,6 +72,11 @@ LEVEL_ROLES = {
     15: "👥 𝕸𝖇 ❁ 𝓻𝓸𝔂𝓪𝓵",
     20: "👥 𝕸𝖇 ❁ 𝓵𝓮𝓰𝓮𝓷𝓭",
 }
+
+# إعدادات نظام المستوى الجديد
+XP_COOLDOWN_SECONDS = 20
+XP_MIN_GAIN = 8
+XP_MAX_GAIN = 12
 
 MEDIATOR_ROLE_OPTIONS = [
     ("🥉", "وسيط مبتدئ 𝕺ₙ"),
@@ -375,8 +379,11 @@ async def count_unauthorized_attempt(ctx):
         except Exception:
             pass
 
+# =========================
+# نظام المستوى الجديد
+# =========================
 def xp_needed_for_level(level: int) -> int:
-    return 120 * (level ** 2) + 80 * level
+    return 100 * (level ** 2)
 
 def level_from_xp(xp: int) -> int:
     level = 0
@@ -386,6 +393,75 @@ def level_from_xp(xp: int) -> int:
 
 def get_next_level_xp(level: int) -> int:
     return xp_needed_for_level(level + 1)
+
+def get_current_level_base_xp(level: int) -> int:
+    if level <= 0:
+        return 0
+    return xp_needed_for_level(level)
+
+async def update_member_level_roles(member: discord.Member, new_level: int):
+    level_role_names = list(LEVEL_ROLES.values())
+
+    roles_to_remove = [
+        discord.utils.get(member.guild.roles, name=role_name)
+        for role_name in level_role_names
+    ]
+    roles_to_remove = [r for r in roles_to_remove if r is not None]
+
+    highest_role_name = None
+    for lvl, role_name in sorted(LEVEL_ROLES.items()):
+        if new_level >= lvl:
+            highest_role_name = role_name
+
+    role_to_add = discord.utils.get(member.guild.roles, name=highest_role_name) if highest_role_name else None
+
+    try:
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason="Level role update")
+        if role_to_add:
+            await member.add_roles(role_to_add, reason="Level up reward")
+    except Exception:
+        pass
+
+async def handle_level_xp(message: discord.Message):
+    if message.author.bot or message.guild is None:
+        return
+
+    content = message.content.strip()
+    if not content:
+        return
+
+    if content.startswith(".") or content.startswith("-"):
+        return
+
+    uid = str(message.author.id)
+    now = time.time()
+    last_time = xp_cooldowns.get(uid, 0)
+
+    if now - last_time < XP_COOLDOWN_SECONDS:
+        return
+
+    xp_cooldowns[uid] = now
+
+    record = get_user_level_record(message.author.id)
+    old_level = record["level"]
+
+    gained_xp = random.randint(XP_MIN_GAIN, XP_MAX_GAIN)
+    new_xp = record["xp"] + gained_xp
+    new_level = level_from_xp(new_xp)
+
+    save_user_level_record(message.author.id, new_xp, new_level)
+
+    if new_level > old_level:
+        level_channel = message.guild.get_channel(LEVEL_CHANNEL_ID)
+        if level_channel:
+            await level_channel.send(
+                f"مبروك {message.author.mention}\n"
+                f"تم ترقية مستواك إلى **لفل {new_level}**\n"
+                f"شد حيلك عشان توصل **لفل {new_level + 1}**"
+            )
+
+        await update_member_level_roles(message.author, new_level)
 
 def sanitize_channel_name(name: str) -> str:
     name = name.lower()
@@ -580,18 +656,6 @@ def make_mediator_panel_embed(guild: discord.Guild):
     )
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
-    return embed
-
-def make_levelup_embed(member: discord.Member, new_level: int):
-    embed = discord.Embed(
-        description=(
-            f"مبروك {member.mention}\n"
-            f"تم ترقية مستواك إلى **{new_level}**\n"
-            f"شد حيلك عشان توصل للمستوى اللي بعده 🚀"
-        ),
-        color=discord.Color.dark_red()
-    )
-    embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
     return embed
 
 def make_welcome_embed(member: discord.Member, rules_channel):
@@ -1580,7 +1644,7 @@ async def on_ready():
         if not ticket.get("claimed_by"):
             schedule_ticket_reminder(int(ticket["channel_id"]))
 
-    print("✅ VERSION FINAL MEDIATOR")
+    print("✅ VERSION FINAL MEDIATOR + LEVEL SYSTEM")
     print(f"البوت شغال كـ {bot.user}")
 
 @bot.event
@@ -1599,12 +1663,8 @@ async def on_member_join(member: discord.Member):
     try:
         image_bytes = await create_welcome_image(member)
         file = discord.File(fp=image_bytes, filename="welcome.png")
-        
-        rules_channel = discord.utils.get(member.guild.text_channels, name=RULES_CHANNEL_NAME)
 
-        # rules_channel = discord.utils.get(member.guild.text_channels, name="モ・「⚖️」الـقـوانـيـن")
-        # if rules_channel is None:
-        #     rules_channel = discord.utils.get(member.guild.text_channels, name="モ・「⚖️」الـقـوانـيـن")
+        rules_channel = discord.utils.get(member.guild.text_channels, name=RULES_CHANNEL_NAME)
 
         embed = make_welcome_embed(member, rules_channel)
         embed.set_image(url="attachment://welcome.png")
@@ -1679,46 +1739,7 @@ async def on_message(message: discord.Message):
                 print(f"Spam timeout error: {e}")
         return
 
-    if not content.startswith(".") and not content.startswith("-") and content:
-        last_time = xp_cooldowns.get(uid, 0)
-
-        if now - last_time >= 30:
-            xp_cooldowns[uid] = now
-
-            record = get_user_level_record(message.author.id)
-            old_level = record["level"]
-
-            gained_xp = random.randint(10, 18)
-            new_xp = record["xp"] + gained_xp
-            new_level = level_from_xp(new_xp)
-
-            save_user_level_record(message.author.id, new_xp, new_level)
-
-            if new_level > old_level:
-                level_channel = message.guild.get_channel(LEVEL_CHANNEL_ID)
-                if level_channel:
-                    embed = make_levelup_embed(message.author, new_level)
-                    await level_channel.send(embed=embed)
-
-                level_role_names = list(LEVEL_ROLES.values())
-                roles_to_remove = [discord.utils.get(message.guild.roles, name=r) for r in level_role_names]
-                roles_to_remove = [r for r in roles_to_remove if r is not None]
-
-                highest_role_name = None
-                for lvl, role_name in sorted(LEVEL_ROLES.items()):
-                    if new_level >= lvl:
-                        highest_role_name = role_name
-
-                role_to_add = discord.utils.get(message.guild.roles, name=highest_role_name) if highest_role_name else None
-
-                try:
-                    if roles_to_remove:
-                        await message.author.remove_roles(*roles_to_remove, reason="Level role update")
-                    if role_to_add:
-                        await message.author.add_roles(role_to_add, reason="Level up reward")
-                except Exception:
-                    pass
-
+    await handle_level_xp(message)
     await bot.process_commands(message)
 
 @bot.event
@@ -1929,26 +1950,31 @@ async def extend_ticket_command(ctx):
 # =========================
 @bot.command(name="لفل")
 async def level_command(ctx, member: discord.Member = None):
+    if ctx.prefix != "-":
+        return
+
     if not is_admin_member(ctx.author) and ctx.channel.name != COMMANDS_CHANNEL_NAME:
         return
 
     target = member or ctx.author
     record = get_user_level_record(target.id)
     current_level = record["level"]
-    current_xp = record["xp"]
+    total_xp = record["xp"]
+
+    current_base = get_current_level_base_xp(current_level)
     next_xp = get_next_level_xp(current_level)
 
-    embed = discord.Embed(
-        title="💫 المستوى",
-        description=(
-            f"**العضو:** {target.mention}\n"
-            f"**اللفل:** {current_level}\n"
-            f"**XP:** {current_xp}/{next_xp}"
-        ),
-        color=discord.Color.dark_red()
+    current_progress = total_xp - current_base
+    needed_progress = next_xp - current_base
+
+    if needed_progress <= 0:
+        needed_progress = 1
+
+    await ctx.send(
+        f"**العضو:** {target.mention}\n"
+        f"**المستوى الحالي:** لفل {current_level}\n"
+        f"**التقدم:** {current_progress}/{needed_progress} XP"
     )
-    embed.set_thumbnail(url=target.display_avatar.url)
-    await ctx.send(embed=embed)
 
 # =========================
 # أوامر إرسال اللوحات
@@ -2008,4 +2034,3 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
-
