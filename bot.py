@@ -34,7 +34,9 @@ bot = commands.Bot(command_prefix=".", intents=intents)
 OWNER_USERNAME = "xjb5"
 
 WELCOME_CHANNEL_NAME = "モ・「👋」الـتـرحـيـب"
+RULES_CHANNEL_NAME = "モ・「⚖️」الـقـوانـيـن"
 WELCOME_BG_URL = "https://i.postimg.cc/xjvBZgKQ/khlfyt.jpg"
+
 
 LINE_TRIGGER = "خط"
 LINE_IMAGE_SOURCE = "https://i.postimg.cc/PrQHV52P/khtt.png"
@@ -1597,10 +1599,12 @@ async def on_member_join(member: discord.Member):
     try:
         image_bytes = await create_welcome_image(member)
         file = discord.File(fp=image_bytes, filename="welcome.png")
+        
+        rules_channel = discord.utils.get(member.guild.text_channels, name=RULES_CHANNEL_NAME)
 
-        rules_channel = discord.utils.get(member.guild.text_channels, name="القوانين")
-        if rules_channel is None:
-            rules_channel = discord.utils.get(member.guild.text_channels, name="قوانين")
+        # rules_channel = discord.utils.get(member.guild.text_channels, name="モ・「⚖️」الـقـوانـيـن")
+        # if rules_channel is None:
+        #     rules_channel = discord.utils.get(member.guild.text_channels, name="モ・「⚖️」الـقـوانـيـن")
 
         embed = make_welcome_embed(member, rules_channel)
         embed.set_image(url="attachment://welcome.png")
@@ -2004,3 +2008,4 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
