@@ -1,3 +1,4 @@
+print("BOT FILE STARTED")
 import discord
 from discord.ext import commands
 import logging
@@ -486,7 +487,7 @@ async def on_ready():
     load_all_data()
     bot.add_view(TicketPanelView())
     bot.add_view(TicketManageView())
-    print("✅ VERSION 777")
+    print("✅ VERSION NEW")
     print(f"البوت شغال كـ {bot.user}")
 
 @bot.event
@@ -1119,6 +1120,7 @@ if __name__ == "__main__":
     else:
 
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
 
 
 
