@@ -35,7 +35,7 @@ WELCOME_CHANNEL_NAME = "モ・「👋」الـتـرحـيـب"
 WELCOME_BG_URL = "https://i.postimg.cc/xjvBZgKQ/khlfyt.jpg"
 
 LINE_TRIGGER = "خط"
-LINE_IMAGE_SOURCE = "https://i.postimg.cc/J4dZ9M6W/Chat-GPT-Image-11-mars-2026-05-31-21-m.png"
+LINE_IMAGE_SOURCE = "https://i.postimg.cc/PrQHV52P/khtt.png"
 
 WELCOME_MEMBER_ROLE = "👥 𝕸𝖇 ❁ عـضـو"
 TICKET_STAFF_ROLE = "𝕺ₙ مــســؤول الــتـكــت"
@@ -255,17 +255,9 @@ async def create_welcome_image(member: discord.Member) -> io.BytesIO:
 
 async def send_line_image(channel: discord.TextChannel):
     try:
-        if LINE_IMAGE_SOURCE.startswith("http://") or LINE_IMAGE_SOURCE.startswith("https://"):
-            embed = discord.Embed(color=discord.Color.dark_red())
-            embed.set_image(url=LINE_IMAGE_SOURCE)
-            await channel.send(embed=embed)
-        elif os.path.exists(LINE_IMAGE_SOURCE):
-            file = discord.File(LINE_IMAGE_SOURCE, filename="line.png")
-            embed = discord.Embed(color=discord.Color.dark_red())
-            embed.set_image(url="attachment://line.png")
-            await channel.send(file=file, embed=embed)
-    except Exception:
-        pass
+        await channel.send(LINE_IMAGE_SOURCE)
+    except Exception as e:
+        await channel.send(f"❌ حصل خطأ: {e}")
 
 # =========================
 # Embeds
@@ -532,15 +524,19 @@ async def on_message(message: discord.Message):
         return
 
     # منشن البوت من إداري
-    if bot.user in message.mentions and is_admin_member(message.author):
+# أمر منشن
+if content == "منشن":
+    if is_admin_member(message.author):
         try:
-            await message.channel.send(
-                "@everyone @here",
-                allowed_mentions=discord.AllowedMentions(everyone=True)
-            )
+            await message.delete()
         except Exception:
             pass
-        return
+
+        await message.channel.send(
+            "@everyone @here",
+            allowed_mentions=discord.AllowedMentions(everyone=True)
+        )
+    return
 
     # XP
     if not content.startswith(""):
@@ -656,7 +652,7 @@ async def show_warnings(ctx, member: discord.Member):
     )
     await ctx.send(embed=embed)
 
-@bot.command(name="مسح_تحذيرات")
+@bot.command(name="اعفاء")
 async def reset_warnings(ctx, member: discord.Member):
     if not is_admin_member(ctx.author):
         await count_unauthorized_attempt(ctx)
@@ -998,3 +994,4 @@ if __name__ == "__main__":
     else:
 
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
