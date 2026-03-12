@@ -533,6 +533,7 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip()
+    print(f"MSG: {message.author} -> {message.content}")
 
 
     # ردود ثابتة
@@ -1123,6 +1124,7 @@ if __name__ == "__main__":
     else:
 
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
 
 
 
