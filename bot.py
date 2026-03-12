@@ -31,7 +31,7 @@ bot = commands.Bot(command_prefix="", intents=intents)
 # =========================
 OWNER_USERNAME = "xjb5"
 
-WELCOME_CHANNEL_NAME = "الترحيب"
+WELCOME_CHANNEL_NAME = "モ・「👋」الـتـرحـيـب"
 WELCOME_BG_URL = "https://i.postimg.cc/xjvBZgKQ/khlfyt.jpg"
 
 LINE_TRIGGER = "خط"
@@ -48,7 +48,7 @@ ALLOWED_ADMIN_ROLES = [
 
 LEVEL_CHANNEL_ID = 1480725848842834074
 GAMES_CHANNEL_NAME = "モ・「🎉」الــفــعــالــيــات"
-TICKET_CATEGORY_NAME = "🎫 Tickets"
+TICKET_CATEGORY_NAME = "サ・「🛠️」تــكــت-الــدعــم-الــفــنــي"
 
 BAD_WORDS = [
     "كسم", "شرموط", "عرص", "خول", "متناك", "ابن الكلب", "ياكلخ", "منيوك"
@@ -996,4 +996,5 @@ if __name__ == "__main__":
     if token:
         bot.run(token)
     else:
+
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
