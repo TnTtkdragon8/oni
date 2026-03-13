@@ -2,6 +2,7 @@ print("BOT FILE STARTED")
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 import logging
 import asyncio
 import os
@@ -14,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import aiohttp
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageOps, ImageFont
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -25,6 +26,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
+intents.presences = True
 
 bot = commands.Bot(command_prefix=[".", "-"], intents=intents)
 
@@ -96,6 +98,18 @@ TICKET_EXTEND_SECONDS = 15 * 60
 TICKET_REMINDER_SECONDS = 2 * 60
 
 # =========================
+# Server Stats / Snapshot
+# =========================
+STATS_CARD_BG = "https://i.postimg.cc/x1W8H5wY/black-bg.jpg"
+
+DEFAULT_FONT_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+]
+
+# =========================
 # Database
 # =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -151,6 +165,40 @@ def init_db():
             claimed_by TEXT,
             claimed_role TEXT,
             delete_at REAL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_stats (
+            guild_id TEXT PRIMARY KEY,
+            total_messages INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_member_activity (
+            guild_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            last_message_at REAL NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_snapshots (
+            guild_id TEXT PRIMARY KEY,
+            taken_at REAL NOT NULL,
+            member_count INTEGER NOT NULL DEFAULT 0,
+            human_count INTEGER NOT NULL DEFAULT 0,
+            bot_count INTEGER NOT NULL DEFAULT 0,
+            channel_count INTEGER NOT NULL DEFAULT 0,
+            text_count INTEGER NOT NULL DEFAULT 0,
+            voice_count INTEGER NOT NULL DEFAULT 0,
+            role_count INTEGER NOT NULL DEFAULT 0,
+            emoji_count INTEGER NOT NULL DEFAULT 0,
+            boost_count INTEGER NOT NULL DEFAULT 0,
+            total_messages INTEGER NOT NULL DEFAULT 0,
+            active_members_24h INTEGER NOT NULL DEFAULT 0
         )
     """)
 
@@ -337,6 +385,124 @@ def get_all_tickets():
     return [dict(r) for r in rows]
 
 # =========================
+# Guild stats DB helpers
+# =========================
+def get_guild_total_messages(guild_id: int) -> int:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT total_messages FROM guild_stats WHERE guild_id = ?", (str(guild_id),))
+    row = cur.fetchone()
+    conn.close()
+    return int(row["total_messages"]) if row else 0
+
+def increment_guild_total_messages(guild_id: int, amount: int = 1):
+    current = get_guild_total_messages(guild_id)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO guild_stats (guild_id, total_messages)
+        VALUES (?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET total_messages=excluded.total_messages
+    """, (str(guild_id), current + amount))
+    conn.commit()
+    conn.close()
+
+def touch_member_activity(guild_id: int, user_id: int, ts: float):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO guild_member_activity (guild_id, user_id, last_message_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET last_message_at=excluded.last_message_at
+    """, (str(guild_id), str(user_id), float(ts)))
+    conn.commit()
+    conn.close()
+
+def get_active_members_last_hours(guild_id: int, hours: int = 24) -> int:
+    cutoff = time.time() - (hours * 3600)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COUNT(*) AS c
+        FROM guild_member_activity
+        WHERE guild_id = ? AND last_message_at >= ?
+    """, (str(guild_id), cutoff))
+    row = cur.fetchone()
+    conn.close()
+    return int(row["c"]) if row else 0
+
+def take_guild_snapshot(guild: discord.Guild):
+    humans = [m for m in guild.members if not m.bot]
+    bots = [m for m in guild.members if m.bot]
+    text_channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
+    voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+
+    snapshot = {
+        "guild_id": str(guild.id),
+        "taken_at": time.time(),
+        "member_count": guild.member_count,
+        "human_count": len(humans),
+        "bot_count": len(bots),
+        "channel_count": len(guild.channels),
+        "text_count": len(text_channels),
+        "voice_count": len(voice_channels),
+        "role_count": len(guild.roles),
+        "emoji_count": len(guild.emojis),
+        "boost_count": guild.premium_subscription_count or 0,
+        "total_messages": get_guild_total_messages(guild.id),
+        "active_members_24h": get_active_members_last_hours(guild.id, 24),
+    }
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO guild_snapshots (
+            guild_id, taken_at, member_count, human_count, bot_count,
+            channel_count, text_count, voice_count, role_count, emoji_count,
+            boost_count, total_messages, active_members_24h
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            taken_at=excluded.taken_at,
+            member_count=excluded.member_count,
+            human_count=excluded.human_count,
+            bot_count=excluded.bot_count,
+            channel_count=excluded.channel_count,
+            text_count=excluded.text_count,
+            voice_count=excluded.voice_count,
+            role_count=excluded.role_count,
+            emoji_count=excluded.emoji_count,
+            boost_count=excluded.boost_count,
+            total_messages=excluded.total_messages,
+            active_members_24h=excluded.active_members_24h
+    """, (
+        snapshot["guild_id"],
+        snapshot["taken_at"],
+        snapshot["member_count"],
+        snapshot["human_count"],
+        snapshot["bot_count"],
+        snapshot["channel_count"],
+        snapshot["text_count"],
+        snapshot["voice_count"],
+        snapshot["role_count"],
+        snapshot["emoji_count"],
+        snapshot["boost_count"],
+        snapshot["total_messages"],
+        snapshot["active_members_24h"],
+    ))
+    conn.commit()
+    conn.close()
+    return snapshot
+
+def get_last_guild_snapshot(guild_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM guild_snapshots WHERE guild_id = ?", (str(guild_id),))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+# =========================
 # مساعدات عامة
 # =========================
 def is_owner_user(member: discord.Member) -> bool:
@@ -485,6 +651,11 @@ def parse_duration(text: str):
             if hours <= 0:
                 return None
             return timedelta(hours=hours)
+        if text.endswith("ي"):
+            days = int(text[:-1])
+            if days <= 0:
+                return None
+            return timedelta(days=days)
     except ValueError:
         return None
     return None
@@ -528,7 +699,8 @@ def get_claimed_by_text(guild: discord.Guild, ticket: dict) -> Optional[str]:
 # أدوات صور
 # =========================
 async def fetch_bytes(url: str):
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url) as resp:
             return await resp.read()
 
@@ -571,6 +743,242 @@ async def send_line_image(channel: discord.TextChannel):
         await channel.send(LINE_IMAGE_SOURCE)
     except Exception as e:
         await channel.send(f"❌ حصل خطأ: {e}", delete_after=5)
+
+# =========================
+# Server stats card helpers
+# =========================
+def load_font(size: int):
+    for path in DEFAULT_FONT_PATHS:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
+def get_live_guild_stats(guild: discord.Guild):
+    humans = [m for m in guild.members if not m.bot]
+    bots = [m for m in guild.members if m.bot]
+    text_channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
+    voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+
+    online_count = 0
+    for member in guild.members:
+        if getattr(member, "status", discord.Status.offline) != discord.Status.offline:
+            online_count += 1
+
+    total_messages = get_guild_total_messages(guild.id)
+    active_24h = get_active_members_last_hours(guild.id, 24)
+
+    engagement = 0.0
+    if len(humans) > 0:
+        engagement = (active_24h / len(humans)) * 100
+
+    success_score = min(
+        100.0,
+        (
+            (min(len(humans), 500) / 500) * 35
+            + (min(engagement, 100)) * 0.45
+            + (min(total_messages, 5000) / 5000) * 20
+        )
+    )
+
+    return {
+        "member_count": guild.member_count,
+        "human_count": len(humans),
+        "bot_count": len(bots),
+        "online_count": online_count,
+        "channel_count": len(guild.channels),
+        "text_count": len(text_channels),
+        "voice_count": len(voice_channels),
+        "role_count": len(guild.roles),
+        "emoji_count": len(guild.emojis),
+        "boost_count": guild.premium_subscription_count or 0,
+        "total_messages": total_messages,
+        "active_members_24h": active_24h,
+        "engagement_percent": engagement,
+        "success_score": success_score,
+    }
+
+def format_change(value: int) -> str:
+    if value > 0:
+        return f"+{value}"
+    if value < 0:
+        return str(value)
+    return "0"
+
+def format_change_float(value: float) -> str:
+    if value > 0:
+        return f"+{value:.1f}"
+    if value < 0:
+        return f"{value:.1f}"
+    return "0.0"
+
+async def create_stats_card(guild: discord.Guild, stats: dict) -> io.BytesIO:
+    try:
+        bg_bytes = await fetch_bytes(STATS_CARD_BG)
+        bg = Image.open(io.BytesIO(bg_bytes)).convert("RGBA").resize((1200, 500))
+    except Exception:
+        bg = Image.new("RGBA", (1200, 500), (20, 20, 24, 255))
+
+    shade = Image.new("RGBA", bg.size, (0, 0, 0, 145))
+    bg = Image.alpha_composite(bg, shade)
+
+    draw = ImageDraw.Draw(bg)
+    title_font = load_font(44)
+    head_font = load_font(28)
+    text_font = load_font(22)
+    small_font = load_font(18)
+
+    # icon
+    if guild.icon:
+        try:
+            icon_bytes = await fetch_bytes(guild.icon.replace(size=256).url)
+            icon = Image.open(io.BytesIO(icon_bytes)).convert("RGBA").resize((120, 120))
+            mask = Image.new("L", (120, 120), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, 120, 120), fill=255)
+            bg.paste(icon, (40, 35), mask)
+        except Exception:
+            pass
+
+    draw.text((185, 45), guild.name, font=title_font, fill=(255, 255, 255, 255))
+    draw.text((185, 102), "Server Snapshot", font=small_font, fill=(185, 185, 185, 255))
+
+    # boxes
+    boxes = [
+        (40, 190, 360, 310),
+        (410, 190, 730, 310),
+        (780, 190, 1160, 310),
+        (40, 340, 360, 460),
+        (410, 340, 730, 460),
+        (780, 340, 1160, 460),
+    ]
+
+    for box in boxes:
+        draw.rounded_rectangle(box, radius=22, fill=(255, 255, 255, 28), outline=(255, 255, 255, 50))
+
+    draw.text((65, 210), "Members", font=head_font, fill=(255, 255, 255, 255))
+    draw.text((65, 245), f"{stats['member_count']}", font=title_font, fill=(255, 255, 255, 255))
+    draw.text((65, 290), f"Humans: {stats['human_count']} | Bots: {stats['bot_count']}", font=small_font, fill=(210, 210, 210, 255))
+
+    draw.text((435, 210), "Online", font=head_font, fill=(255, 255, 255, 255))
+    draw.text((435, 245), f"{stats['online_count']}", font=title_font, fill=(255, 255, 255, 255))
+    draw.text((435, 290), "Current visible members online", font=small_font, fill=(210, 210, 210, 255))
+
+    draw.text((805, 210), "Messages", font=head_font, fill=(255, 255, 255, 255))
+    draw.text((805, 245), f"{stats['total_messages']}", font=title_font, fill=(255, 255, 255, 255))
+    draw.text((805, 290), "Tracked after this code only", font=small_font, fill=(210, 210, 210, 255))
+
+    draw.text((65, 360), "Channels", font=head_font, fill=(255, 255, 255, 255))
+    draw.text((65, 395), f"{stats['channel_count']}", font=title_font, fill=(255, 255, 255, 255))
+    draw.text((65, 438), f"Text: {stats['text_count']} | Voice: {stats['voice_count']}", font=small_font, fill=(210, 210, 210, 255))
+
+    draw.text((435, 360), "Engagement", font=head_font, fill=(255, 255, 255, 255))
+    draw.text((435, 395), f"{stats['engagement_percent']:.1f}%", font=title_font, fill=(255, 255, 255, 255))
+    draw.text((435, 438), f"Active 24h: {stats['active_members_24h']}", font=small_font, fill=(210, 210, 210, 255))
+
+    draw.text((805, 360), "Success", font=head_font, fill=(255, 255, 255, 255))
+    draw.text((805, 395), f"{stats['success_score']:.1f}%", font=title_font, fill=(255, 255, 255, 255))
+    draw.text((805, 438), f"Roles: {stats['role_count']} | Emojis: {stats['emoji_count']} | Boosts: {stats['boost_count']}", font=small_font, fill=(210, 210, 210, 255))
+
+    output = io.BytesIO()
+    bg.save(output, format="PNG")
+    output.seek(0)
+    return output
+
+def build_splus_embed(guild: discord.Guild, old_snapshot: dict, current_stats: dict):
+    old_taken = datetime.fromtimestamp(float(old_snapshot["taken_at"])).strftime("%Y-%m-%d %H:%M")
+
+    member_change = current_stats["member_count"] - int(old_snapshot["member_count"])
+    human_change = current_stats["human_count"] - int(old_snapshot["human_count"])
+    msg_change = current_stats["total_messages"] - int(old_snapshot["total_messages"])
+    active_change = current_stats["active_members_24h"] - int(old_snapshot["active_members_24h"])
+
+    old_engagement = 0.0
+    if int(old_snapshot["human_count"]) > 0:
+        old_engagement = (int(old_snapshot["active_members_24h"]) / int(old_snapshot["human_count"])) * 100
+
+    new_engagement = current_stats["engagement_percent"]
+    engagement_change = new_engagement - old_engagement
+
+    old_success = min(
+        100.0,
+        (
+            (min(int(old_snapshot["human_count"]), 500) / 500) * 35
+            + (min(old_engagement, 100)) * 0.45
+            + (min(int(old_snapshot["total_messages"]), 5000) / 5000) * 20
+        )
+    )
+    success_change = current_stats["success_score"] - old_success
+
+    embed = discord.Embed(
+        title=f"📈 تطور السيرفر - {guild.name}",
+        description=f"المقارنة مع آخر Snapshot محفوظ بتاريخ: **{old_taken}**",
+        color=discord.Color.blurple()
+    )
+
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    embed.add_field(
+        name="👥 الأعضاء",
+        value=(
+            f"الآن: **{current_stats['member_count']}**\n"
+            f"التغير: **{format_change(member_change)}**\n"
+            f"البشريين: **{format_change(human_change)}**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="💬 الرسائل",
+        value=(
+            f"الآن: **{current_stats['total_messages']}**\n"
+            f"التغير: **{format_change(msg_change)}**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🔥 النشاط 24 ساعة",
+        value=(
+            f"الآن: **{current_stats['active_members_24h']}**\n"
+            f"التغير: **{format_change(active_change)}**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="📊 نسبة التفاعل",
+        value=(
+            f"الآن: **{new_engagement:.1f}%**\n"
+            f"التغير: **{format_change_float(engagement_change)}%**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🏆 نسبة النجاح",
+        value=(
+            f"الآن: **{current_stats['success_score']:.1f}%**\n"
+            f"التغير: **{format_change_float(success_change)}%**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🧩 إضافي",
+        value=(
+            f"الرومات: **{current_stats['channel_count']}**\n"
+            f"الرتب: **{current_stats['role_count']}**\n"
+            f"الإيموجي: **{current_stats['emoji_count']}**\n"
+            f"البوست: **{current_stats['boost_count']}**"
+        ),
+        inline=True
+    )
+
+    embed.set_footer(text="استخدم /s أو -s لحفظ Snapshot جديد")
+    return embed
 
 # =========================
 # Embeds
@@ -1632,6 +2040,46 @@ class MediatorTicketPanelView(discord.ui.View):
         self.add_item(MediatorSelect())
 
 # =========================
+# Stats commands logic
+# =========================
+async def send_stats_snapshot_message(target_channel, guild: discord.Guild):
+    stats = get_live_guild_stats(guild)
+    card = await create_stats_card(guild, stats)
+    file = discord.File(card, filename="server_stats.png")
+
+    embed = discord.Embed(
+        title=f"📊 {guild.name}",
+        description="تم إنشاء Snapshot جديد وحفظه للمقارنة القادمة.",
+        color=discord.Color.dark_theme()
+    )
+    embed.set_image(url="attachment://server_stats.png")
+
+    take_guild_snapshot(guild)
+
+    if isinstance(target_channel, discord.Interaction):
+        await target_channel.response.send_message(file=file, embed=embed)
+    else:
+        await target_channel.send(file=file, embed=embed)
+
+async def send_stats_progress_message(target_channel, guild: discord.Guild):
+    old_snapshot = get_last_guild_snapshot(guild.id)
+    if not old_snapshot:
+        text = "❌ لا يوجد Snapshot محفوظ بعد.\nاستخدم `/s` أو `-s` أولًا."
+        if isinstance(target_channel, discord.Interaction):
+            await target_channel.response.send_message(text, ephemeral=True)
+        else:
+            await target_channel.send(text)
+        return
+
+    current_stats = get_live_guild_stats(guild)
+    embed = build_splus_embed(guild, old_snapshot, current_stats)
+
+    if isinstance(target_channel, discord.Interaction):
+        await target_channel.response.send_message(embed=embed)
+    else:
+        await target_channel.send(embed=embed)
+
+# =========================
 # Events
 # =========================
 @bot.event
@@ -1648,7 +2096,13 @@ async def on_ready():
         if not ticket.get("claimed_by"):
             schedule_ticket_reminder(int(ticket["channel_id"]))
 
-    print("✅ VERSION FINAL MEDIATOR + LEVEL SYSTEM")
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash commands")
+    except Exception as e:
+        print(f"Slash sync error: {e}")
+
+    print("✅ VERSION FINAL MEDIATOR + LEVEL SYSTEM + SERVER STATS")
     print(f"البوت شغال كـ {bot.user}")
 
 @bot.event
@@ -1683,6 +2137,10 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip()
+
+    # tracking
+    increment_guild_total_messages(message.guild.id, 1)
+    touch_member_activity(message.guild.id, message.author.id, time.time())
 
     if content == "السلام عليكم":
         await message.channel.send("وعليكم السلام ورحمة الله وبركاته")
@@ -1832,7 +2290,7 @@ async def timeout_command(ctx, member: discord.Member, duration: str, *, reason:
     try:
         delta = parse_duration(duration)
         if delta is None:
-            await admin_dm_or_temp(ctx.author, "❌ استخدم الوقت بهذا الشكل: `10د` أو `2س`")
+            await admin_dm_or_temp(ctx.author, "❌ استخدم الوقت بهذا الشكل: `10د` أو `2س` أو `3ي`")
             return
 
         until = discord.utils.utcnow() + delta
@@ -1981,6 +2439,34 @@ async def level_command(ctx, member: discord.Member = None):
     )
 
 # =========================
+# أوامر السيرفر ستاتس
+# =========================
+@bot.command(name="s")
+async def server_stats_prefix(ctx):
+    await send_stats_snapshot_message(ctx, ctx.guild)
+
+@bot.command(name="splus", aliases=["s+"])
+async def server_stats_plus_prefix(ctx):
+    await send_stats_progress_message(ctx, ctx.guild)
+
+# =========================
+# Slash Commands
+# =========================
+@bot.tree.command(name="s", description="عرض صورة إحصائيات السيرفر وحفظ Snapshot")
+async def slash_s(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ الأمر داخل السيرفر فقط.", ephemeral=True)
+        return
+    await send_stats_snapshot_message(interaction, interaction.guild)
+
+@bot.tree.command(name="splus", description="عرض تطور السيرفر من آخر Snapshot")
+async def slash_splus(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("❌ الأمر داخل السيرفر فقط.", ephemeral=True)
+        return
+    await send_stats_progress_message(interaction, interaction.guild)
+
+# =========================
 # أوامر إرسال اللوحات
 # =========================
 @bot.command(name="تكت")
@@ -2038,7 +2524,3 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
-
-
-
-
