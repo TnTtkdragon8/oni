@@ -97,7 +97,9 @@ TICKET_REMINDER_SECONDS = 2 * 60
 # =========================
 # Database
 # =========================
-DATA_DIR = "data"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
 DB_PATH = os.path.join(DATA_DIR, "bot_data.db")
 
 unauthorized_attempts = {}
@@ -111,7 +113,7 @@ ticket_reminder_tasks = {}
 # =========================
 def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs("temp", exist_ok=True)
+    os.makedirs(TEMP_DIR, exist_ok=True)
 
 def get_db():
     ensure_data_dir()
@@ -352,7 +354,7 @@ def has_member_role(member: discord.Member) -> bool:
     return any(role.name == WELCOME_MEMBER_ROLE for role in member.roles)
 
 def can_use_member_features(member: discord.Member) -> bool:
-    return has_member_role(member) or is_admin_member(member)
+    return not member.bot
 
 def get_role_mentions(guild: discord.Guild, role_names):
     mentions = []
@@ -1815,7 +1817,7 @@ async def reset_warnings(ctx, member: discord.Member):
         return
 
     set_warning_count(member.id, 0)
-    await ctx.send(f"✅ تم تصفير تحذيرات {member.mention}")
+    await ctx.send(f"✅ تم إعفاء {member.mention} من جميع التحذيرات")
 
 @bot.command(name="تايم")
 async def timeout_command(ctx, member: discord.Member, duration: str, *, reason: str = "بدون سبب"):
@@ -2035,6 +2037,3 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
-
-
-
