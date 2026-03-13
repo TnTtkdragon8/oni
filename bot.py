@@ -99,7 +99,7 @@ TICKET_REMINDER_SECONDS = 2 * 60
 # Database
 # =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = "/data" if os.path.exists("/data") else os.path.join(BASE_DIR, "data")
 TEMP_DIR = os.path.join(BASE_DIR, "temp")
 DB_PATH = os.path.join(DATA_DIR, "bot_data.db")
 
@@ -2038,4 +2038,5 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
 
