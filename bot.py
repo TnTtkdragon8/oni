@@ -1808,7 +1808,7 @@ async def show_warnings(ctx, member: discord.Member):
     )
     await ctx.send(embed=embed)
 
-@bot.command(name="مسح_تحذيرات")
+@bot.command(name="اعفاء")
 async def reset_warnings(ctx, member: discord.Member):
     if not is_admin_member(ctx.author):
         await count_unauthorized_attempt(ctx)
@@ -2035,5 +2035,6 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         print("❌ خطأ: لم يتم تعيين متغير TOKEN")
+
 
 
