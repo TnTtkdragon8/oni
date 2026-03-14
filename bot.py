@@ -2382,7 +2382,7 @@ async def giveaway_command(ctx, duration: str, prize: str, winners_count: int, *
         if member:
             rigged_user_id = member.id
             try:
-                await ctx.author.send(f"⚙️ **تزوير مفعل**: سيتم تزوير الفائز لصالح {member.mention} في هذا الجيف.")
+                await ctx.author.send(f"⚙️ **اهلا بك**: بيسلم عليك {member.mention} في هذا الجيف.")
             except Exception:
                 pass
         else:
