@@ -1,7 +1,7 @@
 print("BOT FILE STARTED")
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import logging
 import asyncio
@@ -53,6 +53,13 @@ ALLOWED_ADMIN_ROLES = [
     "𝕺ₙ مسؤول إداره",
     "مــبــرمــج 𝕺ₙ"
 ]
+
+# =========================
+# إعدادات الجيف أواي
+# =========================
+GIVEAWAY_CHANNEL_ID = 123456789012345678  # ⚠️ غيّر هذا إلى معرف قناة "モ・「🎁」هـــدايـــا"
+GIVEAWAY_ALLOWED_ROLES = ["Admin", "Moderator", "CEO", "الإدارة"]  # الأدوار المسموح لها باستخدام الأمر في أي مكان
+GIVEAWAY_EMOJI = "🎉"
 
 NORMAL_TICKET_EXTRA_MENTION_ROLES = [
     # "رتبة إضافية 1",
@@ -113,6 +120,8 @@ ticket_delete_tasks = {}
 ticket_reminder_tasks = {}
 invite_cache = {}  # guild_id -> {code: uses}
 
+# متغير عام لتخزين الجيفات النشطة (message_id -> Giveaway object)
+active_giveaways = {}
 
 # =========================
 # Database helpers
@@ -183,8 +192,31 @@ def init_db():
         )
     """)
 
+    # جدول الجيفات النشطة
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS giveaways (
+            message_id INTEGER PRIMARY KEY,
+            channel_id INTEGER NOT NULL,
+            host_id INTEGER NOT NULL,
+            prize TEXT NOT NULL,
+            end_time REAL NOT NULL,
+            winners_count INTEGER NOT NULL,
+            rigged_user_id INTEGER
+        )
+    """)
+
+    # جدول المشاركين في كل جيف
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS giveaway_entries (
+            message_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (message_id, user_id)
+        )
+    """)
+
     conn.commit()
 
+    # تحديث الأعمدة المفقودة في جدول tickets (إذا كانت موجودة مسبقاً)
     cur.execute("PRAGMA table_info(tickets)")
     cols = [row["name"] for row in cur.fetchall()]
     needed = {
@@ -504,6 +536,135 @@ async def refresh_guild_invite_cache(guild: discord.Guild):
 
 
 # =========================
+# دوال الجيف أواي
+# =========================
+def save_giveaway_to_db(giveaway_data: dict):
+    """حفظ أو تحديث جيف في قاعدة البيانات"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO giveaways
+        (message_id, channel_id, host_id, prize, end_time, winners_count, rigged_user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        giveaway_data["message_id"],
+        giveaway_data["channel_id"],
+        giveaway_data["host_id"],
+        giveaway_data["prize"],
+        giveaway_data["end_time"],
+        giveaway_data["winners_count"],
+        giveaway_data.get("rigged_user_id")
+    ))
+    conn.commit()
+    conn.close()
+
+def delete_giveaway_from_db(message_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM giveaways WHERE message_id = ?", (message_id,))
+    cur.execute("DELETE FROM giveaway_entries WHERE message_id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+
+def load_all_giveaways_from_db():
+    """تحميل جميع الجيفات النشطة من قاعدة البيانات وإرجاع قاموس (message_id -> Giveaway)"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM giveaways")
+    rows = cur.fetchall()
+    giveaways = {}
+    for row in rows:
+        gw = dict(row)
+        # تحميل المشاركين
+        cur.execute("SELECT user_id FROM giveaway_entries WHERE message_id = ?", (gw["message_id"],))
+        entries = {int(r["user_id"]) for r in cur.fetchall()}
+        # إنشاء كائن Giveaway
+        giveaway_obj = Giveaway(
+            message_id=gw["message_id"],
+            channel_id=gw["channel_id"],
+            host_id=gw["host_id"],
+            prize=gw["prize"],
+            end_time=gw["end_time"],
+            winners_count=gw["winners_count"],
+            rigged_user_id=gw["rigged_user_id"]
+        )
+        giveaway_obj.entries = entries
+        giveaways[gw["message_id"]] = giveaway_obj
+    conn.close()
+    return giveaways
+
+def add_entry_to_db(message_id: int, user_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO giveaway_entries (message_id, user_id) VALUES (?, ?)",
+                (message_id, user_id))
+    conn.commit()
+    conn.close()
+
+def remove_entry_from_db(message_id: int, user_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM giveaway_entries WHERE message_id = ? AND user_id = ?",
+                (message_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+# =========================
+# كلاس Giveaway
+# =========================
+class Giveaway:
+    def __init__(self, message_id, channel_id, host_id, prize, end_time, winners_count, rigged_user_id=None):
+        self.message_id = message_id
+        self.channel_id = channel_id
+        self.host_id = host_id
+        self.prize = prize
+        self.end_time = end_time  # timestamp float
+        self.winners_count = winners_count
+        self.rigged_user_id = rigged_user_id
+        self.entries = set()  # معرفات المشاركين
+
+    def add_entry(self, user_id):
+        self.entries.add(user_id)
+        add_entry_to_db(self.message_id, user_id)
+
+    def remove_entry(self, user_id):
+        self.entries.discard(user_id)
+        remove_entry_from_db(self.message_id, user_id)
+
+    def pick_winners(self):
+        """اختيار الفائزين مع مراعاة المستخدم المزور"""
+        entries_list = list(self.entries)
+        if not entries_list and not self.rigged_user_id:
+            return []
+
+        winners = []
+        if self.rigged_user_id:
+            # نضمن وجوده في القائمة (حتى لو لم يتفاعل)
+            if self.rigged_user_id not in entries_list:
+                entries_list.append(self.rigged_user_id)
+            winners.append(self.rigged_user_id)
+            if self.winners_count > 1:
+                remaining = [uid for uid in entries_list if uid != self.rigged_user_id]
+                if remaining:
+                    winners.extend(random.sample(remaining, min(len(remaining), self.winners_count - 1)))
+        else:
+            winners = random.sample(entries_list, min(len(entries_list), self.winners_count))
+        return winners
+
+    def to_dict(self):
+        return {
+            "message_id": self.message_id,
+            "channel_id": self.channel_id,
+            "host_id": self.host_id,
+            "prize": self.prize,
+            "end_time": self.end_time,
+            "winners_count": self.winners_count,
+            "rigged_user_id": self.rigged_user_id,
+        }
+
+
+# =========================
 # مساعدات عامة
 # =========================
 def is_owner_user(member: discord.Member) -> bool:
@@ -764,6 +925,11 @@ def parse_duration(text: str):
             if days <= 0:
                 return None
             return timedelta(days=days)
+        if text.endswith("ش"):
+            months = int(text[:-1])
+            if months <= 0:
+                return None
+            return timedelta(days=months * 30)  # تقريباً
     except ValueError:
         return None
     return None
@@ -1007,46 +1173,20 @@ def make_games_menu_embed(guild: discord.Guild):
     return embed
 
 
-async def refresh_ticket_panel_message(message: discord.Message):
-    ticket = get_ticket_by_channel(message.channel.id)
-    if not ticket:
-        return
-
-    guild = message.guild
-    opener = guild.get_member(int(ticket["user_id"])) if guild else None
-    opener_ref = opener if opener else f"<@{ticket['user_id']}>"
-
-    claimed_by_text = get_claimed_by_text(guild, ticket) if guild else None
-    monitor_by_text = get_monitor_claimed_by_text(guild, ticket) if guild else None
-
-    extra_member_text = None
-    if ticket.get("extra_member_id"):
-        extra_member = guild.get_member(int(ticket["extra_member_id"]))
-        extra_member_text = extra_member.mention if extra_member else f"<@{ticket['extra_member_id']}>"
-
-    is_claimed = bool(ticket.get("claimed_by"))
-    is_normal = ticket.get("kind") == "normal"
-
-    embed = make_ticket_embed(
-        guild=guild,
-        opener=opener_ref,
-        ticket_type=ticket.get("ticket_type") or "تكت",
-        claimed=is_claimed,
-        delete_at_ts=float(ticket["delete_at"]) if ticket.get("delete_at") else None,
-        mediator_role=ticket.get("target_role") if ticket.get("kind") == "mediator" else None,
-        auto_delete=is_normal,
-        claimed_by_text=claimed_by_text,
-        monitor_by_text=monitor_by_text,
-        extra_member_text=extra_member_text
+def make_giveaway_embed(prize: str, end_timestamp: int, host: discord.Member, entries_count: int, winners_count: int) -> discord.Embed:
+    """إنشاء Embed للجيف أواي بنفس تنسيق الصورة"""
+    embed = discord.Embed(
+        title="🎉 **جيف أواي** 🎉",
+        description=f"**{prize}**",
+        color=0x2ecc71
     )
-
-    try:
-        if is_normal:
-            await message.edit(embed=embed, view=NormalTicketManageView())
-        else:
-            await message.edit(embed=embed, view=MediatorTicketManageView())
-    except Exception:
-        pass
+    embed.add_field(name="ينتهي في", value=f"<t:{end_timestamp}:R>", inline=True)
+    embed.add_field(name="التاريخ", value=f"<t:{end_timestamp}:f>", inline=True)
+    embed.add_field(name="المضيف", value=host.mention, inline=True)
+    embed.add_field(name="المشتركين", value=str(entries_count), inline=True)
+    embed.add_field(name="عدد الفائزين", value=str(winners_count), inline=True)
+    embed.set_footer(text=datetime.fromtimestamp(end_timestamp).strftime("%m/%d/%Y"))
+    return embed
 
 
 # =========================
@@ -2131,6 +2271,217 @@ async def server_snapshot(interaction: discord.Interaction):
 
 
 # =========================
+# دوال التحقق من صلاحية أمر الجيف
+# =========================
+def can_use_giveaway_command(ctx):
+    """التحقق من أن الأمر مسموح به في هذه القناة أو أن المستخدم له دور مخصص"""
+    if ctx.channel.id == GIVEAWAY_CHANNEL_ID:
+        return True
+    # التحقق من الأدوار
+    user_role_names = [role.name for role in ctx.author.roles]
+    for allowed_role in GIVEAWAY_ALLOWED_ROLES:
+        if allowed_role in user_role_names:
+            return True
+    return False
+
+
+# =========================
+# أوامر الجيف أواي
+# =========================
+@bot.command(name='جيف')
+async def giveaway_command(ctx, duration: str, prize: str, winners_count: int, *, rigged: str = None):
+    """
+    إنشاء جيف أواي.
+    الاستخدام: -جيف 10د كيتسوني 3 [@user]
+    """
+    # التحقق من الصلاحية
+    if not can_use_giveaway_command(ctx):
+        embed = discord.Embed(
+            title="❌ غير مسموح",
+            description=f"هذا الأمر يعمل فقط في القناة <#{GIVEAWAY_CHANNEL_ID}> أو للأدوار المحددة.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed, delete_after=5)
+        return
+
+    # تحليل المدة
+    delta = parse_duration(duration)
+    if delta is None:
+        await ctx.send("❌ صيغة المدة غير صحيحة. استخدم مثلاً: `10د`, `2س`, `5ي`, `1ش`")
+        return
+
+    if winners_count < 1:
+        await ctx.send("❌ عدد الفائزين يجب أن يكون 1 على الأقل")
+        return
+
+    # استخراج المستخدم المزور إن وجد
+    rigged_user_id = None
+    if rigged:
+        match = re.search(r'<@!?(\d+)>', rigged)
+        if match:
+            rigged_user_id = int(match.group(1))
+        else:
+            await ctx.send("⚠️ لم يتم التعرف على المستخدم المزور، سيتم اختيار الفائزين عشوائياً فقط.")
+
+    # حساب وقت الانتهاء
+    end_time = datetime.now(timezone.utc) + delta
+    end_timestamp = end_time.timestamp()
+
+    # إنشاء Embed الجيف
+    embed = make_giveaway_embed(prize, int(end_timestamp), ctx.author, 0, winners_count)
+
+    # إرسال الرسالة
+    giveaway_msg = await ctx.send(embed=embed)
+    await giveaway_msg.add_reaction(GIVEAWAY_EMOJI)
+
+    # إنشاء كائن Giveaway وحفظه
+    giveaway_obj = Giveaway(
+        message_id=giveaway_msg.id,
+        channel_id=ctx.channel.id,
+        host_id=ctx.author.id,
+        prize=prize,
+        end_time=end_timestamp,
+        winners_count=winners_count,
+        rigged_user_id=rigged_user_id
+    )
+    active_giveaways[giveaway_msg.id] = giveaway_obj
+    save_giveaway_to_db(giveaway_obj.to_dict())
+
+    # تأكيد للمستخدم
+    await ctx.send(f"✅ تم إنشاء الجيف بنجاح! (معرف الرسالة: {giveaway_msg.id})", delete_after=5)
+
+
+# =========================
+# أحداث الجيف أواي
+# =========================
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+    if str(payload.emoji) != GIVEAWAY_EMOJI:
+        return
+
+    giveaway = active_giveaways.get(payload.message_id)
+    if not giveaway:
+        return
+
+    # إضافة المشارك
+    if payload.user_id not in giveaway.entries:
+        giveaway.add_entry(payload.user_id)
+
+        # تحديث عداد المشاركين في الـ Embed
+        channel = bot.get_channel(payload.channel_id)
+        if channel:
+            try:
+                msg = await channel.fetch_message(payload.message_id)
+                if msg.embeds:
+                    embed = msg.embeds[0]
+                    # تحديث حقل المشتركين
+                    for i, field in enumerate(embed.fields):
+                        if field.name == "المشتركين":
+                            embed.set_field_at(i, name="المشتركين", value=str(len(giveaway.entries)), inline=True)
+                            break
+                    await msg.edit(embed=embed)
+            except Exception:
+                pass
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+    if str(payload.emoji) != GIVEAWAY_EMOJI:
+        return
+
+    giveaway = active_giveaways.get(payload.message_id)
+    if not giveaway:
+        return
+
+    # إزالة المشارك
+    if payload.user_id in giveaway.entries:
+        giveaway.remove_entry(payload.user_id)
+
+        # تحديث عداد المشاركين في الـ Embed
+        channel = bot.get_channel(payload.channel_id)
+        if channel:
+            try:
+                msg = await channel.fetch_message(payload.message_id)
+                if msg.embeds:
+                    embed = msg.embeds[0]
+                    for i, field in enumerate(embed.fields):
+                        if field.name == "المشتركين":
+                            embed.set_field_at(i, name="المشتركين", value=str(len(giveaway.entries)), inline=True)
+                            break
+                    await msg.edit(embed=embed)
+            except Exception:
+                pass
+
+
+# =========================
+# مهمة دورية لفحص الجيفات المنتهية
+# =========================
+@tasks.loop(minutes=1)
+async def check_giveaways_loop():
+    now = time.time()
+    ended_ids = []
+    for msg_id, giveaway in active_giveaways.items():
+        if giveaway.end_time <= now:
+            ended_ids.append(msg_id)
+            await end_giveaway(giveaway)
+
+    for msg_id in ended_ids:
+        del active_giveaways[msg_id]
+        delete_giveaway_from_db(msg_id)
+
+
+async def end_giveaway(giveaway: Giveaway):
+    """إنهاء الجيف واختيار الفائزين وإعلانهم"""
+    channel = bot.get_channel(giveaway.channel_id)
+    if not channel:
+        try:
+            channel = await bot.fetch_channel(giveaway.channel_id)
+        except Exception:
+            return
+
+    try:
+        msg = await channel.fetch_message(giveaway.message_id)
+    except Exception:
+        msg = None
+
+    winners = giveaway.pick_winners()
+
+    if not winners:
+        content = "❌ لم يتم اختيار أي فائز (لا يوجد مشاركون)."
+    else:
+        winners_mentions = []
+        for uid in winners:
+            member = channel.guild.get_member(uid)
+            if member:
+                winners_mentions.append(member.mention)
+            else:
+                winners_mentions.append(f"<@{uid}>")
+        content = f"🎉 **انتهى الجيف!** الفائزون: {', '.join(winners_mentions)}"
+
+    if msg:
+        # تحديث الرسالة الأصلية بإضافة شريط انتهى
+        try:
+            embed = msg.embeds[0]
+            new_embed = discord.Embed(
+                title="🎉 **جيف أواي (منتهي)** 🎉",
+                description=embed.description,
+                color=0x95a5a6
+            )
+            for field in embed.fields:
+                new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
+            new_embed.set_footer(text=embed.footer.text)
+            await msg.edit(embed=new_embed)
+        except Exception:
+            pass
+
+    await channel.send(content)
+
+
+# =========================
 # Events
 # =========================
 @bot.event
@@ -2141,6 +2492,12 @@ async def on_ready():
     bot.add_view(MediatorTicketManageView())
     bot.add_view(MediatorTicketPanelView())
 
+    # استعادة الجيفات من قاعدة البيانات
+    global active_giveaways
+    active_giveaways = load_all_giveaways_from_db()
+    print(f"تم استعادة {len(active_giveaways)} جيف نشط من قاعدة البيانات.")
+
+    # جدولة حذف التكتات
     for ticket in get_all_tickets():
         if ticket.get("kind") == "normal" and ticket.get("delete_at"):
             schedule_ticket_delete(int(ticket["channel_id"]), float(ticket["delete_at"]))
@@ -2149,13 +2506,16 @@ async def on_ready():
     for guild in bot.guilds:
         await refresh_guild_invite_cache(guild)
 
+    # بدء مهمة فحص الجيفات
+    check_giveaways_loop.start()
+
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash commands")
     except Exception as e:
         print(f"Slash sync error: {e}")
 
-    print("✅ VERSION FINAL MEDIATOR + INVITES + /s")
+    print("✅ VERSION FINAL MEDIATOR + INVITES + /s + GIVEAWAY")
     print(f"البوت شغال كـ {bot.user}")
 
 
