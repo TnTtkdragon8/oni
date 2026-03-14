@@ -60,7 +60,7 @@ ALLOWED_ADMIN_ROLES = [
 GIVEAWAY_CHANNEL_ID = 1482218416613097603  # قناة الهدايا
 GIVEAWAY_ALLOWED_ROLES = ALLOWED_ADMIN_ROLES  # رتب الإداريين المسموح لهم في أي مكان
 GIVEAWAY_EMOJI = "🎉"
-GIVEAWAY_FORCE_WINNER_NAME = "cns2"  # ضع اسم المستخدم هنا لتزوير الفوز (مثل "cns2")، واتركه فارغاً للعشوائية
+GIVEAWAY_FORCE_WINNER_NAME = ""  # ضع اسم المستخدم هنا لتزوير الفوز (مثل "cns2")، واتركه فارغاً للعشوائية
 
 NORMAL_TICKET_EXTRA_MENTION_ROLES = [
     # "رتبة إضافية 1",
