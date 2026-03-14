@@ -27,8 +27,9 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 intents.presences = True
+intents.invites = True
 
-bot = commands.Bot(command_prefix=[".", "-"], intents=intents)
+bot = commands.Bot(command_prefix=[".", "-", "!"], intents=intents)
 
 # =========================
 # إعدادات عامة
@@ -44,6 +45,7 @@ LINE_IMAGE_SOURCE = "https://i.postimg.cc/PrQHV52P/khtt.png"
 
 WELCOME_MEMBER_ROLE = "👥 𝕸𝖇 ❁ عـضـو"
 TICKET_STAFF_ROLE = "𝕺ₙ مــســؤول الــتـكــت"
+MEDIATOR_MONITOR_ROLE = "مــراقــب وسـطـاء 𝕺ₙ"
 
 ALLOWED_ADMIN_ROLES = [
     "باشا البلد",
@@ -94,6 +96,8 @@ TICKET_AUTO_DELETE_SECONDS = 15 * 60
 TICKET_EXTEND_SECONDS = 15 * 60
 TICKET_REMINDER_SECONDS = 2 * 60
 
+FAKE_ACCOUNT_DAYS = 7  # للحساب الوهمي في الدعوات
+
 # =========================
 # Database
 # =========================
@@ -107,6 +111,8 @@ xp_cooldowns = {}
 spam_tracker = {}
 ticket_delete_tasks = {}
 ticket_reminder_tasks = {}
+invite_cache = {}  # guild_id -> {code: uses}
+
 
 # =========================
 # Database helpers
@@ -115,11 +121,13 @@ def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
 
+
 def get_db():
     ensure_data_dir()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     conn = get_db()
@@ -149,7 +157,29 @@ def init_db():
             target_role TEXT,
             claimed_by TEXT,
             claimed_role TEXT,
-            delete_at REAL
+            delete_at REAL,
+            monitor_claimed_by TEXT,
+            extra_member_id TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS invite_joins (
+            joined_user_id TEXT PRIMARY KEY,
+            inviter_id TEXT,
+            invite_code TEXT,
+            joined_at TEXT,
+            account_created_at TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS invite_codes (
+            guild_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            inviter_id TEXT,
+            uses INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, code)
         )
     """)
 
@@ -164,6 +194,8 @@ def init_db():
         "claimed_by": "ALTER TABLE tickets ADD COLUMN claimed_by TEXT",
         "claimed_role": "ALTER TABLE tickets ADD COLUMN claimed_role TEXT",
         "delete_at": "ALTER TABLE tickets ADD COLUMN delete_at REAL",
+        "monitor_claimed_by": "ALTER TABLE tickets ADD COLUMN monitor_claimed_by TEXT",
+        "extra_member_id": "ALTER TABLE tickets ADD COLUMN extra_member_id TEXT",
     }
     for col, sql in needed.items():
         if col not in cols:
@@ -172,6 +204,10 @@ def init_db():
     conn.commit()
     conn.close()
 
+
+# =========================
+# Warning helpers
+# =========================
 def get_warning_count(user_id: int) -> int:
     conn = get_db()
     cur = conn.cursor()
@@ -179,6 +215,7 @@ def get_warning_count(user_id: int) -> int:
     row = cur.fetchone()
     conn.close()
     return int(row["count"]) if row else 0
+
 
 def set_warning_count(user_id: int, count: int):
     conn = get_db()
@@ -191,11 +228,16 @@ def set_warning_count(user_id: int, count: int):
     conn.commit()
     conn.close()
 
+
 def add_warning(user_id: int) -> int:
     current = get_warning_count(user_id) + 1
     set_warning_count(user_id, current)
     return current
 
+
+# =========================
+# Level helpers
+# =========================
 def get_user_level_record(user_id: int):
     conn = get_db()
     cur = conn.cursor()
@@ -215,6 +257,7 @@ def get_user_level_record(user_id: int):
     conn.close()
     return record
 
+
 def save_user_level_record(user_id: int, xp: int, level: int):
     conn = get_db()
     cur = conn.cursor()
@@ -226,6 +269,10 @@ def save_user_level_record(user_id: int, xp: int, level: int):
     conn.commit()
     conn.close()
 
+
+# =========================
+# Ticket helpers
+# =========================
 def get_open_ticket_channel_id(user_id: int, kind: Optional[str] = None):
     conn = get_db()
     cur = conn.cursor()
@@ -243,6 +290,7 @@ def get_open_ticket_channel_id(user_id: int, kind: Optional[str] = None):
     conn.close()
     return int(row["channel_id"]) if row else None
 
+
 def set_ticket_record(
     channel_id: int,
     user_id: int,
@@ -252,15 +300,17 @@ def set_ticket_record(
     claimed_by: Optional[int] = None,
     claimed_role: Optional[str] = None,
     delete_at: Optional[float] = None,
+    monitor_claimed_by: Optional[int] = None,
+    extra_member_id: Optional[int] = None,
 ):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO tickets (
             channel_id, user_id, kind, ticket_type, target_role,
-            claimed_by, claimed_role, delete_at
+            claimed_by, claimed_role, delete_at, monitor_claimed_by, extra_member_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(channel_id) DO UPDATE SET
             user_id=excluded.user_id,
             kind=excluded.kind,
@@ -268,7 +318,9 @@ def set_ticket_record(
             target_role=excluded.target_role,
             claimed_by=excluded.claimed_by,
             claimed_role=excluded.claimed_role,
-            delete_at=excluded.delete_at
+            delete_at=excluded.delete_at,
+            monitor_claimed_by=excluded.monitor_claimed_by,
+            extra_member_id=excluded.extra_member_id
     """, (
         int(channel_id),
         str(user_id),
@@ -278,9 +330,12 @@ def set_ticket_record(
         str(claimed_by) if claimed_by else None,
         claimed_role,
         float(delete_at) if delete_at else None,
+        str(monitor_claimed_by) if monitor_claimed_by else None,
+        str(extra_member_id) if extra_member_id else None,
     ))
     conn.commit()
     conn.close()
+
 
 def get_ticket_by_channel(channel_id: int):
     conn = get_db()
@@ -289,6 +344,7 @@ def get_ticket_by_channel(channel_id: int):
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
+
 
 def update_ticket_claim(channel_id: int, claimed_by: Optional[int], claimed_role: Optional[str] = None):
     conn = get_db()
@@ -300,6 +356,29 @@ def update_ticket_claim(channel_id: int, claimed_by: Optional[int], claimed_role
     conn.commit()
     conn.close()
 
+
+def update_ticket_monitor_claim(channel_id: int, monitor_claimed_by: Optional[int]):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE tickets SET monitor_claimed_by = ? WHERE channel_id = ?",
+        (str(monitor_claimed_by) if monitor_claimed_by else None, int(channel_id))
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_ticket_extra_member(channel_id: int, extra_member_id: Optional[int]):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE tickets SET extra_member_id = ? WHERE channel_id = ?",
+        (str(extra_member_id) if extra_member_id else None, int(channel_id))
+    )
+    conn.commit()
+    conn.close()
+
+
 def update_ticket_delete_at(channel_id: int, delete_at: Optional[float]):
     conn = get_db()
     cur = conn.cursor()
@@ -309,6 +388,7 @@ def update_ticket_delete_at(channel_id: int, delete_at: Optional[float]):
     )
     conn.commit()
     conn.close()
+
 
 def update_ticket_target_role(channel_id: int, target_role: Optional[str]):
     conn = get_db()
@@ -320,12 +400,14 @@ def update_ticket_target_role(channel_id: int, target_role: Optional[str]):
     conn.commit()
     conn.close()
 
+
 def delete_ticket_record_by_channel(channel_id: int):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM tickets WHERE channel_id = ?", (int(channel_id),))
     conn.commit()
     conn.close()
+
 
 def get_all_tickets():
     conn = get_db()
@@ -335,26 +417,118 @@ def get_all_tickets():
     conn.close()
     return [dict(r) for r in rows]
 
+
+# =========================
+# Invite helpers
+# =========================
+def save_invite_snapshot(guild_id: int, invites: list[discord.Invite]):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM invite_codes WHERE guild_id = ?", (str(guild_id),))
+    for inv in invites:
+        inviter_id = str(inv.inviter.id) if inv.inviter else None
+        cur.execute("""
+            INSERT OR REPLACE INTO invite_codes (guild_id, code, inviter_id, uses)
+            VALUES (?, ?, ?, ?)
+        """, (str(guild_id), inv.code, inviter_id, int(inv.uses or 0)))
+    conn.commit()
+    conn.close()
+
+
+def record_member_join_invite(joined_user_id: int, inviter_id: Optional[int], invite_code: Optional[str], joined_at: datetime, account_created_at: datetime):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO invite_joins (
+            joined_user_id, inviter_id, invite_code, joined_at, account_created_at
+        ) VALUES (?, ?, ?, ?, ?)
+    """, (
+        str(joined_user_id),
+        str(inviter_id) if inviter_id else None,
+        invite_code,
+        joined_at.isoformat(),
+        account_created_at.isoformat()
+    ))
+    conn.commit()
+    conn.close()
+
+
+def get_invite_stats_for_user(guild: discord.Guild, inviter_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT joined_user_id, account_created_at
+        FROM invite_joins
+        WHERE inviter_id = ?
+    """, (str(inviter_id),))
+    rows = cur.fetchall()
+    conn.close()
+
+    total = len(rows)
+    left = 0
+    fake = 0
+
+    for row in rows:
+        joined_member = guild.get_member(int(row["joined_user_id"]))
+        if joined_member is None:
+            left += 1
+
+        try:
+            created_at = datetime.fromisoformat(row["account_created_at"])
+            joined_age = datetime.now(timezone.utc) - created_at
+            if joined_age.days < FAKE_ACCOUNT_DAYS:
+                fake += 1
+        except Exception:
+            pass
+
+    real = total - fake - left
+    if real < 0:
+        real = 0
+
+    return {
+        "total": total,
+        "fake": fake,
+        "left": left,
+        "real": real,
+    }
+
+
+async def refresh_guild_invite_cache(guild: discord.Guild):
+    try:
+        invites = await guild.invites()
+    except Exception:
+        return
+
+    invite_cache[guild.id] = {inv.code: int(inv.uses or 0) for inv in invites}
+    save_invite_snapshot(guild.id, invites)
+
+
 # =========================
 # مساعدات عامة
 # =========================
 def is_owner_user(member: discord.Member) -> bool:
     return member.name.lower() == OWNER_USERNAME.lower()
 
+
 def has_any_role(member: discord.Member, role_names) -> bool:
     return any(role.name in role_names for role in member.roles)
+
 
 def is_admin_member(member: discord.Member) -> bool:
     return has_any_role(member, ALLOWED_ADMIN_ROLES)
 
+
 def is_ticket_staff(member: discord.Member) -> bool:
     return is_admin_member(member) or any(role.name == TICKET_STAFF_ROLE for role in member.roles)
+
 
 def has_member_role(member: discord.Member) -> bool:
     return any(role.name == WELCOME_MEMBER_ROLE for role in member.roles)
 
+
 def can_use_member_features(member: discord.Member) -> bool:
     return not member.bot
+
 
 def get_role_mentions(guild: discord.Guild, role_names):
     mentions = []
@@ -364,12 +538,19 @@ def get_role_mentions(guild: discord.Guild, role_names):
             mentions.append(role.mention)
     return mentions
 
+
 def get_mediator_role_names():
     return [name for _, name in MEDIATOR_ROLE_OPTIONS]
+
 
 def is_mediator_member(member: discord.Member) -> bool:
     mediator_role_names = get_mediator_role_names()
     return any(role.name in mediator_role_names for role in member.roles)
+
+
+def is_mediator_monitor(member: discord.Member) -> bool:
+    return any(role.name == MEDIATOR_MONITOR_ROLE for role in member.roles) or is_admin_member(member)
+
 
 async def count_unauthorized_attempt(ctx):
     uid = str(ctx.author.id)
@@ -381,11 +562,13 @@ async def count_unauthorized_attempt(ctx):
         except Exception:
             pass
 
+
 # =========================
 # نظام المستوى
 # =========================
 def xp_needed_for_level(level: int) -> int:
     return 100 * (level ** 2)
+
 
 def level_from_xp(xp: int) -> int:
     level = 0
@@ -393,13 +576,16 @@ def level_from_xp(xp: int) -> int:
         level += 1
     return level
 
+
 def get_next_level_xp(level: int) -> int:
     return xp_needed_for_level(level + 1)
+
 
 def get_current_level_base_xp(level: int) -> int:
     if level <= 0:
         return 0
     return xp_needed_for_level(level)
+
 
 async def update_member_level_roles(member: discord.Member, new_level: int):
     level_role_names = list(LEVEL_ROLES.values())
@@ -425,6 +611,7 @@ async def update_member_level_roles(member: discord.Member, new_level: int):
     except Exception:
         pass
 
+
 async def handle_level_xp(message: discord.Message):
     if message.author.bot or message.guild is None:
         return
@@ -433,7 +620,7 @@ async def handle_level_xp(message: discord.Message):
     if not content:
         return
 
-    if content.startswith(".") or content.startswith("-"):
+    if content.startswith(".") or content.startswith("-") or content.startswith("!"):
         return
 
     uid = str(message.author.id)
@@ -466,6 +653,7 @@ async def handle_level_xp(message: discord.Message):
 
         await update_member_level_roles(message.author, new_level)
 
+
 # =========================
 # /s helpers
 # =========================
@@ -492,12 +680,14 @@ def human_timedelta_from_dt(dt: datetime) -> str:
         return "1 year ago"
     return f"{years} years ago"
 
+
 def get_online_count(guild: discord.Guild) -> int:
     count = 0
     for member in guild.members:
         if member.status != discord.Status.offline:
             count += 1
     return count
+
 
 def build_server_snapshot_embed(guild: discord.Guild) -> discord.Embed:
     text_count = len([c for c in guild.channels if isinstance(c, discord.TextChannel)])
@@ -507,7 +697,6 @@ def build_server_snapshot_embed(guild: discord.Guild) -> discord.Embed:
     online_count = get_online_count(guild)
     boosts = guild.premium_subscription_count or 0
     role_count = len(guild.roles)
-
     created_text = human_timedelta_from_dt(guild.created_at)
 
     verification_map = {
@@ -520,10 +709,7 @@ def build_server_snapshot_embed(guild: discord.Guild) -> discord.Embed:
 
     owner_text = guild.owner.mention if guild.owner else "Unknown"
 
-    embed = discord.Embed(
-        color=discord.Color.from_rgb(47, 49, 54)
-    )
-
+    embed = discord.Embed(color=discord.Color.from_rgb(47, 49, 54))
     embed.description = (
         f"**{guild.name}**\n\n"
         f"🆔 **Server ID:**\n"
@@ -539,8 +725,7 @@ def build_server_snapshot_embed(guild: discord.Guild) -> discord.Embed:
         f"{text_count} Text | {voice_count} Voice\n\n"
         f"🌍 **Others**\n"
         f"Verification Level: {verification_map.get(guild.verification_level, 'Unknown')}\n\n"
-        f"🔐 **Roles ({role_count})**\n"
-        f"To see a list with all roles use `/roles`"
+        f"🔐 **Roles ({role_count})**"
     )
 
     if guild.icon:
@@ -551,6 +736,7 @@ def build_server_snapshot_embed(guild: discord.Guild) -> discord.Embed:
 
     return embed
 
+
 # =========================
 # أدوات عامة
 # =========================
@@ -559,6 +745,7 @@ def sanitize_channel_name(name: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9\u0600-\u06FF_-]", "-", name)
     name = re.sub(r"-+", "-", name).strip("-")
     return name[:50] if name else "ticket"
+
 
 def parse_duration(text: str):
     try:
@@ -572,9 +759,15 @@ def parse_duration(text: str):
             if hours <= 0:
                 return None
             return timedelta(hours=hours)
+        if text.endswith("ي"):
+            days = int(text[:-1])
+            if days <= 0:
+                return None
+            return timedelta(days=days)
     except ValueError:
         return None
     return None
+
 
 async def can_manage_target(ctx, member: discord.Member):
     if member == bot.user:
@@ -594,11 +787,13 @@ async def can_manage_target(ctx, member: discord.Member):
         return False
     return True
 
+
 async def admin_dm_or_temp(member: discord.Member, text: str):
     try:
         await member.send(text)
     except Exception:
         pass
+
 
 def get_claimed_by_text(guild: discord.Guild, ticket: dict) -> Optional[str]:
     claimed_by = ticket.get("claimed_by")
@@ -611,6 +806,19 @@ def get_claimed_by_text(guild: discord.Guild, ticket: dict) -> Optional[str]:
 
     return f"<@{claimed_by}>"
 
+
+def get_monitor_claimed_by_text(guild: discord.Guild, ticket: dict) -> Optional[str]:
+    monitor_claimed_by = ticket.get("monitor_claimed_by")
+    if not monitor_claimed_by:
+        return None
+
+    member = guild.get_member(int(monitor_claimed_by))
+    if member:
+        return member.mention
+
+    return f"<@{monitor_claimed_by}>"
+
+
 # =========================
 # أدوات صور
 # =========================
@@ -618,6 +826,7 @@ async def fetch_bytes(url: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             return await resp.read()
+
 
 async def create_welcome_image(member: discord.Member) -> io.BytesIO:
     bg_bytes = await fetch_bytes(WELCOME_BG_URL)
@@ -653,11 +862,13 @@ async def create_welcome_image(member: discord.Member) -> io.BytesIO:
     output.seek(0)
     return output
 
+
 async def send_line_image(channel: discord.TextChannel):
     try:
         await channel.send(LINE_IMAGE_SOURCE)
     except Exception as e:
         await channel.send(f"❌ حصل خطأ: {e}", delete_after=5)
+
 
 # =========================
 # Embeds
@@ -683,6 +894,7 @@ def make_warn_embed(ctx, member: discord.Member, reason: str, count: int):
     )
     return embed
 
+
 def make_ticket_embed(
     guild: discord.Guild,
     opener,
@@ -691,7 +903,9 @@ def make_ticket_embed(
     delete_at_ts=None,
     mediator_role=None,
     auto_delete=True,
-    claimed_by_text=None
+    claimed_by_text=None,
+    monitor_by_text=None,
+    extra_member_text=None
 ):
     opener_mention = opener.mention if hasattr(opener, "mention") else str(opener)
 
@@ -703,6 +917,10 @@ def make_ticket_embed(
     extra = ""
     if mediator_role:
         extra += f"\n🎯 نوع الوسيط المطلوب: **{mediator_role}**"
+    if monitor_by_text:
+        extra += f"\n🛡️ المراقب المستلم: {monitor_by_text}"
+    if extra_member_text:
+        extra += f"\n👥 العضو المضاف: {extra_member_text}"
 
     if auto_delete and delete_at_ts:
         remaining = max(0, int(delete_at_ts - time.time()))
@@ -727,6 +945,7 @@ def make_ticket_embed(
     embed.set_footer(text=guild.name)
     return embed
 
+
 def make_mediator_panel_embed(guild: discord.Guild):
     embed = discord.Embed(
         title="🎫 تكت الوسيط",
@@ -741,13 +960,15 @@ def make_mediator_panel_embed(guild: discord.Guild):
             "🟢 وسيط جيد 𝕺ₙ\n"
             "💎 وسيط ممتاز 𝕺ₙ\n"
             "👑 وسيط اسطوري 𝕺ₙ\n"
-            "🔥 وسيط مخضرم 𝕺ₙ"
+            "🔥 وسيط مخضرم 𝕺ₙ\n\n"
+            f"**رتبة المراقب:** {MEDIATOR_MONITOR_ROLE}"
         ),
         color=discord.Color.dark_gold()
     )
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
     return embed
+
 
 def make_welcome_embed(member: discord.Member, rules_channel):
     server_name = member.guild.name
@@ -765,6 +986,7 @@ def make_welcome_embed(member: discord.Member, rules_channel):
         color=discord.Color.dark_red()
     )
     return embed
+
 
 def make_games_menu_embed(guild: discord.Guild):
     embed = discord.Embed(
@@ -784,6 +1006,7 @@ def make_games_menu_embed(guild: discord.Guild):
     embed.set_footer(text="اختر اللعبة من الأزرار")
     return embed
 
+
 async def refresh_ticket_panel_message(message: discord.Message):
     ticket = get_ticket_by_channel(message.channel.id)
     if not ticket:
@@ -794,6 +1017,13 @@ async def refresh_ticket_panel_message(message: discord.Message):
     opener_ref = opener if opener else f"<@{ticket['user_id']}>"
 
     claimed_by_text = get_claimed_by_text(guild, ticket) if guild else None
+    monitor_by_text = get_monitor_claimed_by_text(guild, ticket) if guild else None
+
+    extra_member_text = None
+    if ticket.get("extra_member_id"):
+        extra_member = guild.get_member(int(ticket["extra_member_id"]))
+        extra_member_text = extra_member.mention if extra_member else f"<@{ticket['extra_member_id']}>"
+
     is_claimed = bool(ticket.get("claimed_by"))
     is_normal = ticket.get("kind") == "normal"
 
@@ -805,7 +1035,9 @@ async def refresh_ticket_panel_message(message: discord.Message):
         delete_at_ts=float(ticket["delete_at"]) if ticket.get("delete_at") else None,
         mediator_role=ticket.get("target_role") if ticket.get("kind") == "mediator" else None,
         auto_delete=is_normal,
-        claimed_by_text=claimed_by_text
+        claimed_by_text=claimed_by_text,
+        monitor_by_text=monitor_by_text,
+        extra_member_text=extra_member_text
     )
 
     try:
@@ -815,6 +1047,7 @@ async def refresh_ticket_panel_message(message: discord.Message):
             await message.edit(embed=embed, view=MediatorTicketManageView())
     except Exception:
         pass
+
 
 # =========================
 # Ticket scheduling
@@ -840,6 +1073,7 @@ async def ticket_auto_delete_task(channel_id: int, delete_at: float):
     ticket_delete_tasks.pop(int(channel_id), None)
     stop_ticket_reminder(int(channel_id))
 
+
 def schedule_ticket_delete(channel_id: int, delete_at: float):
     channel_id = int(channel_id)
     old = ticket_delete_tasks.get(channel_id)
@@ -849,6 +1083,7 @@ def schedule_ticket_delete(channel_id: int, delete_at: float):
         ticket_auto_delete_task(channel_id, delete_at)
     )
 
+
 def build_reminder_mentions(guild: discord.Guild, ticket: dict) -> str:
     if ticket.get("kind") == "normal":
         role_names = [TICKET_STAFF_ROLE] + NORMAL_TICKET_EXTRA_MENTION_ROLES
@@ -856,15 +1091,21 @@ def build_reminder_mentions(guild: discord.Guild, ticket: dict) -> str:
         return " ".join(mentions)
 
     target_role = ticket.get("target_role")
+    mentions = []
+
     if target_role == "الكل":
-        mentions = get_role_mentions(guild, get_mediator_role_names())
-        return " ".join(mentions)
-
-    if target_role:
+        mentions.extend(get_role_mentions(guild, get_mediator_role_names()))
+    elif target_role:
         role = discord.utils.get(guild.roles, name=target_role)
-        return role.mention if role else ""
+        if role:
+            mentions.append(role.mention)
 
-    return ""
+    monitor_role = discord.utils.get(guild.roles, name=MEDIATOR_MONITOR_ROLE)
+    if monitor_role:
+        mentions.append(monitor_role.mention)
+
+    return " ".join(mentions)
+
 
 async def ticket_reminder_loop(channel_id: int):
     while True:
@@ -872,8 +1113,6 @@ async def ticket_reminder_loop(channel_id: int):
 
         ticket = get_ticket_by_channel(channel_id)
         if not ticket:
-            break
-        if ticket.get("claimed_by"):
             break
 
         channel = bot.get_channel(int(channel_id))
@@ -887,16 +1126,25 @@ async def ticket_reminder_loop(channel_id: int):
             break
 
         mention_text = build_reminder_mentions(channel.guild, ticket)
-        if mention_text:
-            try:
-                await channel.send(
-                    f"{mention_text} ⏰ تذكير: توجد تذكرة بانتظار الاستلام.",
-                    allowed_mentions=discord.AllowedMentions(roles=True)
-                )
-            except Exception:
-                pass
+
+        try:
+            if ticket.get("kind") == "mediator":
+                if not ticket.get("claimed_by") or not ticket.get("monitor_claimed_by"):
+                    await channel.send(
+                        f"{mention_text} ⏰ تذكير: توجد تذكرة وسيط تحتاج استلام وسيط ومراقب.",
+                        allowed_mentions=discord.AllowedMentions(roles=True)
+                    )
+            else:
+                if not ticket.get("claimed_by"):
+                    await channel.send(
+                        f"{mention_text} ⏰ تذكير: توجد تذكرة بانتظار الاستلام.",
+                        allowed_mentions=discord.AllowedMentions(roles=True)
+                    )
+        except Exception:
+            pass
 
     ticket_reminder_tasks.pop(int(channel_id), None)
+
 
 def schedule_ticket_reminder(channel_id: int):
     channel_id = int(channel_id)
@@ -907,10 +1155,12 @@ def schedule_ticket_reminder(channel_id: int):
         ticket_reminder_loop(channel_id)
     )
 
+
 def stop_ticket_reminder(channel_id: int):
     task = ticket_reminder_tasks.pop(int(channel_id), None)
     if task:
         task.cancel()
+
 
 # =========================
 # Games
@@ -946,6 +1196,7 @@ class GamesMenuView(discord.ui.View):
     @discord.ui.button(label="قريبًا", style=discord.ButtonStyle.secondary, emoji="🕹️")
     async def soon(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("اللعبة دي هتتضاف قريبًا.", ephemeral=True)
+
 
 class RouletteLobbyView(discord.ui.View):
     def __init__(self, creator_id: int):
@@ -1025,6 +1276,7 @@ class RouletteLobbyView(discord.ui.View):
         except Exception:
             pass
 
+
 class XOButton(discord.ui.Button):
     def __init__(self, index: int):
         super().__init__(style=discord.ButtonStyle.secondary, label="\u200b", row=index // 3)
@@ -1070,6 +1322,7 @@ class XOButton(discord.ui.Button):
             view=view
         )
 
+
 class XOBoardView(discord.ui.View):
     def __init__(self, player1: int, player2: int):
         super().__init__(timeout=600)
@@ -1089,6 +1342,7 @@ class XOBoardView(discord.ui.View):
             (0,4,8),(2,4,6)
         ]
         return any(self.board[a] == self.board[b] == self.board[c] == symbol for a, b, c in wins)
+
 
 class XOLobbyView(discord.ui.View):
     def __init__(self, creator_id: int):
@@ -1155,6 +1409,69 @@ class XOLobbyView(discord.ui.View):
         await interaction.response.defer()
         await self.refresh()
 
+
+# =========================
+# تكت الوسيط - Modal
+# =========================
+class AddMemberModal(discord.ui.Modal, title="إضافة عضو إلى التذكرة"):
+    member_value = discord.ui.TextInput(
+        label="اكتب منشن العضو أو ID",
+        placeholder="@user أو 123456789",
+        required=True,
+        max_length=50
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ غير متاح.", ephemeral=True)
+            return
+
+        ticket = get_ticket_by_channel(interaction.channel.id)
+        if not ticket:
+            await interaction.response.send_message("❌ التذكرة غير موجودة.", ephemeral=True)
+            return
+
+        if str(interaction.user.id) != str(ticket["user_id"]) and not is_admin_member(interaction.user):
+            await interaction.response.send_message("❌ فقط صاحب التذكرة أو الإداري يقدر يضيف عضو.", ephemeral=True)
+            return
+
+        raw = str(self.member_value).strip()
+        match = re.search(r"\d{17,20}", raw)
+        if not match:
+            await interaction.response.send_message("❌ اكتب منشن صحيح أو ID صحيح.", ephemeral=True)
+            return
+
+        member_id = int(match.group())
+        member = interaction.guild.get_member(member_id)
+        if not member:
+            await interaction.response.send_message("❌ العضو غير موجود في السيرفر.", ephemeral=True)
+            return
+
+        try:
+            await interaction.channel.set_permissions(
+                member,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True
+            )
+            update_ticket_extra_member(interaction.channel.id, member.id)
+
+            # تحديث الرسالة الأصلية لو أمكن
+            try:
+                async for msg in interaction.channel.history(limit=20):
+                    if msg.author == bot.user and msg.embeds:
+                        await refresh_ticket_panel_message(msg)
+                        break
+            except Exception:
+                pass
+
+            await interaction.response.send_message(f"✅ تم إضافة {member.mention} إلى التكت.")
+        except Exception as e:
+            await interaction.response.send_message(f"❌ حصل خطأ: {e}", ephemeral=True)
+
+
 # =========================
 # Views التكت
 # =========================
@@ -1198,6 +1515,15 @@ class ChangeMediatorTypeSelect(discord.ui.Select):
             role = discord.utils.get(guild.roles, name=role_name)
             if role:
                 await channel.set_permissions(role, overwrite=None)
+
+        monitor_role = discord.utils.get(guild.roles, name=MEDIATOR_MONITOR_ROLE)
+        if monitor_role:
+            await channel.set_permissions(
+                monitor_role,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
 
         if new_role_name == "الكل":
             for role_name in get_mediator_role_names():
@@ -1247,10 +1573,12 @@ class ChangeMediatorTypeSelect(discord.ui.Select):
             allowed_mentions=discord.AllowedMentions(roles=True)
         )
 
+
 class ChangeMediatorTypeView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
         self.add_item(ChangeMediatorTypeSelect())
+
 
 class BaseTicketManageView(discord.ui.View):
     def __init__(self):
@@ -1317,21 +1645,51 @@ class BaseTicketManageView(discord.ui.View):
                 break
 
         update_ticket_claim(interaction.channel.id, interaction.user.id, claimed_role)
-        stop_ticket_reminder(interaction.channel.id)
 
         try:
             await refresh_ticket_panel_message(interaction.message)
         except Exception:
             pass
 
-        embed = discord.Embed(
-            description=(
-                f"✅ الوسيط {interaction.user.mention} استلم التذكرة.\n"
-                f"اتفضل اشرح طلبك."
-            ),
-            color=discord.Color.green()
+        msg = (
+            f"✅ الوسيط {interaction.user.mention} استلم التذكرة.\n"
+            f"اتفضل اشرح طلبك."
         )
+
+        if not ticket.get("monitor_claimed_by"):
+            msg += f"\n\n⚠️ الرجاء عدم بدء عملية التوسط إلا بوجود مراقب ({MEDIATOR_MONITOR_ROLE})."
+
+        embed = discord.Embed(description=msg, color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
+
+    async def monitor_claim_logic(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ غير متاح.", ephemeral=True)
+            return
+
+        if not is_mediator_monitor(interaction.user):
+            await interaction.response.send_message("❌ الزر ده للمراقب فقط.", ephemeral=True)
+            return
+
+        ticket = get_ticket_by_channel(interaction.channel.id)
+        if not ticket or ticket.get("kind") != "mediator":
+            await interaction.response.send_message("❌ هذا الزر لتكت الوسيط فقط.", ephemeral=True)
+            return
+
+        if ticket.get("monitor_claimed_by"):
+            await interaction.response.send_message("❌ تم استلام المراقبة بالفعل.", ephemeral=True)
+            return
+
+        update_ticket_monitor_claim(interaction.channel.id, interaction.user.id)
+
+        try:
+            await refresh_ticket_panel_message(interaction.message)
+        except Exception:
+            pass
+
+        await interaction.response.send_message(
+            f"✅ تم استلام المراقبة بواسطة {interaction.user.mention}"
+        )
 
     async def request_change_mediator_logic(self, interaction: discord.Interaction):
         if not isinstance(interaction.user, discord.Member):
@@ -1355,6 +1713,14 @@ class BaseTicketManageView(discord.ui.View):
             view=ChangeMediatorTypeView(),
             ephemeral=True
         )
+
+    async def add_member_logic(self, interaction: discord.Interaction):
+        ticket = get_ticket_by_channel(interaction.channel.id)
+        if not ticket or ticket.get("kind") != "mediator":
+            await interaction.response.send_message("❌ هذا الزر لتكت الوسيط فقط.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(AddMemberModal())
 
     async def close_ticket_logic(self, interaction: discord.Interaction):
         if not isinstance(interaction.user, discord.Member):
@@ -1381,6 +1747,8 @@ class BaseTicketManageView(discord.ui.View):
             if is_admin_member(interaction.user):
                 can_close = True
             elif is_mediator_member(interaction.user):
+                can_close = True
+            elif is_mediator_monitor(interaction.user):
                 can_close = True
             elif interaction.user.id == owner_id and not claimed_by:
                 can_close = True
@@ -1409,6 +1777,7 @@ class BaseTicketManageView(discord.ui.View):
             await interaction.channel.delete(reason=f"Ticket closed by {interaction.user}")
         except Exception:
             pass
+
 
 class NormalTicketManageView(BaseTicketManageView):
     def __init__(self):
@@ -1452,6 +1821,7 @@ class NormalTicketManageView(BaseTicketManageView):
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.close_ticket_logic(interaction)
 
+
 class MediatorTicketManageView(BaseTicketManageView):
     def __init__(self):
         super().__init__()
@@ -1460,6 +1830,14 @@ class MediatorTicketManageView(BaseTicketManageView):
     async def claim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.claim_ticket_logic(interaction)
 
+    @discord.ui.button(label="استلام مراقب", style=discord.ButtonStyle.secondary, emoji="🛡️", custom_id="ticket_monitor_claim")
+    async def monitor_claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.monitor_claim_logic(interaction)
+
+    @discord.ui.button(label="إضافة عضو", style=discord.ButtonStyle.primary, emoji="👥", custom_id="ticket_add_member")
+    async def add_member(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.add_member_logic(interaction)
+
     @discord.ui.button(label="طلب تغيير نوع الوسيط", style=discord.ButtonStyle.secondary, emoji="🔄", custom_id="mediator_change_request")
     async def request_change_mediator(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.request_change_mediator_logic(interaction)
@@ -1467,6 +1845,7 @@ class MediatorTicketManageView(BaseTicketManageView):
     @discord.ui.button(label="قفل التكت", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="ticket_close_mediator")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.close_ticket_logic(interaction)
+
 
 class TicketPanelView(discord.ui.View):
     def __init__(self):
@@ -1588,6 +1967,7 @@ class TicketPanelView(discord.ui.View):
     async def refresh_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("✅ تم تحديث الخيارات.", ephemeral=True)
 
+
 class MediatorSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -1657,6 +2037,14 @@ class MediatorSelect(discord.ui.Select):
             )
         }
 
+        monitor_role = discord.utils.get(guild.roles, name=MEDIATOR_MONITOR_ROLE)
+        if monitor_role:
+            overwrites[monitor_role] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+
         for role_name in ALLOWED_ADMIN_ROLES + MEDIATOR_EXTRA_WATCH_ROLES:
             role = discord.utils.get(guild.roles, name=role_name)
             if role:
@@ -1682,7 +2070,9 @@ class MediatorSelect(discord.ui.Select):
             target_role=selected_role_name,
             claimed_by=None,
             claimed_role=None,
-            delete_at=None
+            delete_at=None,
+            monitor_claimed_by=None,
+            extra_member_id=None
         )
         schedule_ticket_reminder(channel.id)
 
@@ -1694,15 +2084,21 @@ class MediatorSelect(discord.ui.Select):
             delete_at_ts=None,
             mediator_role=selected_role_name,
             auto_delete=False,
-            claimed_by_text=None
+            claimed_by_text=None,
+            monitor_by_text=None,
+            extra_member_text=None
         )
 
+        content_lines = [
+            member.mention,
+            selected_role.mention,
+            "⚠️ ممنوع فتح التذكرة للعب أو الهزار أو بدون سبب واضح."
+        ]
+        if monitor_role:
+            content_lines.insert(2, monitor_role.mention)
+
         await channel.send(
-            content=(
-                f"{member.mention}\n"
-                f"{selected_role.mention}\n"
-                "⚠️ ممنوع فتح التذكرة للعب أو الهزار أو بدون سبب واضح."
-            ),
+            content="\n".join(content_lines),
             embed=embed,
             view=MediatorTicketManageView(),
             allowed_mentions=discord.AllowedMentions(users=True, roles=True)
@@ -1713,10 +2109,12 @@ class MediatorSelect(discord.ui.Select):
             ephemeral=True
         )
 
+
 class MediatorTicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(MediatorSelect())
+
 
 # =========================
 # Slash Commands
@@ -1730,6 +2128,7 @@ async def server_snapshot(interaction: discord.Interaction):
 
     embed = build_server_snapshot_embed(guild)
     await interaction.response.send_message(embed=embed)
+
 
 # =========================
 # Events
@@ -1745,8 +2144,10 @@ async def on_ready():
     for ticket in get_all_tickets():
         if ticket.get("kind") == "normal" and ticket.get("delete_at"):
             schedule_ticket_delete(int(ticket["channel_id"]), float(ticket["delete_at"]))
-        if not ticket.get("claimed_by"):
-            schedule_ticket_reminder(int(ticket["channel_id"]))
+        schedule_ticket_reminder(int(ticket["channel_id"]))
+
+    for guild in bot.guilds:
+        await refresh_guild_invite_cache(guild)
 
     try:
         synced = await bot.tree.sync()
@@ -1754,8 +2155,21 @@ async def on_ready():
     except Exception as e:
         print(f"Slash sync error: {e}")
 
-    print("✅ VERSION FINAL MEDIATOR + LEVEL SYSTEM + /s")
+    print("✅ VERSION FINAL MEDIATOR + INVITES + /s")
     print(f"البوت شغال كـ {bot.user}")
+
+
+@bot.event
+async def on_invite_create(invite: discord.Invite):
+    if invite.guild:
+        await refresh_guild_invite_cache(invite.guild)
+
+
+@bot.event
+async def on_invite_delete(invite: discord.Invite):
+    if invite.guild:
+        await refresh_guild_invite_cache(invite.guild)
+
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -1766,6 +2180,43 @@ async def on_member_join(member: discord.Member):
         except Exception:
             pass
 
+    # تتبع الدعوات
+    inviter_id = None
+    invite_code = None
+    try:
+        before = invite_cache.get(member.guild.id, {})
+        invites = await member.guild.invites()
+        after = {inv.code: int(inv.uses or 0) for inv in invites}
+
+        used_invite = None
+        for inv in invites:
+            old_uses = before.get(inv.code, 0)
+            new_uses = int(inv.uses or 0)
+            if new_uses > old_uses:
+                used_invite = inv
+                break
+
+        if used_invite:
+            inviter_id = used_invite.inviter.id if used_invite.inviter else None
+            invite_code = used_invite.code
+
+        invite_cache[member.guild.id] = after
+        save_invite_snapshot(member.guild.id, invites)
+    except Exception as e:
+        print(f"Invite tracking error: {e}")
+
+    try:
+        record_member_join_invite(
+            joined_user_id=member.id,
+            inviter_id=inviter_id,
+            invite_code=invite_code,
+            joined_at=datetime.now(timezone.utc),
+            account_created_at=member.created_at
+        )
+    except Exception as e:
+        print(f"Invite join save error: {e}")
+
+    # الترحيب
     channel = discord.utils.get(member.guild.text_channels, name=WELCOME_CHANNEL_NAME)
     if not channel:
         return
@@ -1782,6 +2233,7 @@ async def on_member_join(member: discord.Member):
         await channel.send(file=file, embed=embed)
     except Exception as e:
         print(f"خطأ في الترحيب: {e}")
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -1819,7 +2271,7 @@ async def on_message(message: discord.Message):
             )
         return
 
-    if content in ["-العاب", ".العاب"]:
+    if content in ["-العاب", ".العاب", "!العاب"]:
         if can_use_member_features(message.author):
             view = GamesMenuView()
             embed = make_games_menu_embed(message.guild)
@@ -1852,6 +2304,7 @@ async def on_message(message: discord.Message):
     await handle_level_xp(message)
     await bot.process_commands(message)
 
+
 @bot.event
 async def on_command_error(ctx, error):
     if not is_admin_member(ctx.author):
@@ -1871,6 +2324,8 @@ async def on_command_error(ctx, error):
             msg = "❌ استخدم: `.حذف 10`"
         elif ctx.command and ctx.command.name == "مد":
             msg = "❌ استخدم: `.مد` داخل التكت العادي"
+        elif ctx.command and ctx.command.name == "دعوات":
+            msg = "❌ استخدم: `!دعوات @الشخص`"
         else:
             msg = "❌ ناقص جزء في الأمر."
     elif isinstance(error, commands.BadArgument):
@@ -1880,6 +2335,7 @@ async def on_command_error(ctx, error):
         await admin_dm_or_temp(ctx.author, msg)
     else:
         print(f"Command error: {error}")
+
 
 # =========================
 # أوامر الإدارة
@@ -1903,6 +2359,7 @@ async def warn_command(ctx, member: discord.Member, *, reason: str):
 
     await ctx.send(embed=embed)
 
+
 @bot.command(name="تحذيرات")
 async def show_warnings(ctx, member: discord.Member):
     if not is_admin_member(ctx.author):
@@ -1917,6 +2374,7 @@ async def show_warnings(ctx, member: discord.Member):
     )
     await ctx.send(embed=embed)
 
+
 @bot.command(name="اعفاء")
 async def reset_warnings(ctx, member: discord.Member):
     if not is_admin_member(ctx.author):
@@ -1925,6 +2383,7 @@ async def reset_warnings(ctx, member: discord.Member):
 
     set_warning_count(member.id, 0)
     await ctx.send(f"✅ تم إعفاء {member.mention} من جميع التحذيرات")
+
 
 @bot.command(name="تايم")
 async def timeout_command(ctx, member: discord.Member, duration: str, *, reason: str = "بدون سبب"):
@@ -1938,7 +2397,7 @@ async def timeout_command(ctx, member: discord.Member, duration: str, *, reason:
     try:
         delta = parse_duration(duration)
         if delta is None:
-            await admin_dm_or_temp(ctx.author, "❌ استخدم الوقت بهذا الشكل: `10د` أو `2س`")
+            await admin_dm_or_temp(ctx.author, "❌ استخدم الوقت بهذا الشكل: `10د` أو `2س` أو `3ي`")
             return
 
         until = discord.utils.utcnow() + delta
@@ -1948,6 +2407,7 @@ async def timeout_command(ctx, member: discord.Member, duration: str, *, reason:
         await admin_dm_or_temp(ctx.author, "❌ مش عندي صلاحية أعمل تايم.")
     except Exception as e:
         await admin_dm_or_temp(ctx.author, f"❌ حصل خطأ: {e}")
+
 
 @bot.command(name="فك")
 async def untimeout_command(ctx, member: discord.Member):
@@ -1966,6 +2426,7 @@ async def untimeout_command(ctx, member: discord.Member):
     except Exception as e:
         await admin_dm_or_temp(ctx.author, f"❌ حصل خطأ: {e}")
 
+
 @bot.command(name="ق")
 async def lock_command(ctx):
     if not is_admin_member(ctx.author):
@@ -1976,6 +2437,7 @@ async def lock_command(ctx):
     await ctx.channel.set_permissions(ctx.guild.me, send_messages=True, view_channel=True, read_message_history=True)
     await ctx.send("🔒 تم قفل الشات.", delete_after=3)
 
+
 @bot.command(name="ف")
 async def unlock_command(ctx):
     if not is_admin_member(ctx.author):
@@ -1985,6 +2447,7 @@ async def unlock_command(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
     await ctx.channel.set_permissions(ctx.guild.me, send_messages=True, view_channel=True, read_message_history=True)
     await ctx.send("🔓 تم فتح الشات.", delete_after=3)
+
 
 @bot.command(name="انطر")
 async def kick_command(ctx, member: discord.Member, *, reason: str = "بدون سبب"):
@@ -2003,6 +2466,7 @@ async def kick_command(ctx, member: discord.Member, *, reason: str = "بدون �
     except Exception as e:
         await admin_dm_or_temp(ctx.author, f"❌ حصل خطأ: {e}")
 
+
 @bot.command(name="تفو")
 async def ban_command(ctx, member: discord.Member, *, reason: str = "بدون سبب"):
     if not any(role.name == "باشا البلد" for role in ctx.author.roles):
@@ -2020,6 +2484,7 @@ async def ban_command(ctx, member: discord.Member, *, reason: str = "بدون س
     except Exception as e:
         await admin_dm_or_temp(ctx.author, f"❌ حصل خطأ: {e}")
 
+
 @bot.command(name="حذف")
 async def clear_command(ctx, amount: int):
     if not (is_owner_user(ctx.author) or is_admin_member(ctx.author)):
@@ -2032,6 +2497,7 @@ async def clear_command(ctx, amount: int):
 
     await ctx.channel.purge(limit=amount + 1)
     await ctx.send(f"🧹 تم مسح {amount} رسالة", delete_after=3)
+
 
 @bot.command(name="مد")
 async def extend_ticket_command(ctx):
@@ -2054,6 +2520,34 @@ async def extend_ticket_command(ctx):
     schedule_ticket_delete(ctx.channel.id, new_delete_at)
 
     await ctx.send("✅ تم تمديد التكت 15 دقيقة.")
+
+
+# =========================
+# أوامر الدعوات
+# =========================
+@bot.command(name="دعوات")
+async def invites_command(ctx, member: discord.Member):
+    stats = get_invite_stats_for_user(ctx.guild, member.id)
+
+    embed = discord.Embed(
+        title="Invite Tracker",
+        color=discord.Color.dark_red()
+    )
+
+    if member.display_avatar:
+        embed.set_thumbnail(url=member.display_avatar.url)
+
+    embed.description = (
+        f"**العضو:** {member.mention}\n\n"
+        f"✅ **حقيقي:** {stats['real']}\n"
+        f"🌀 **وهمي:** {stats['fake']}\n"
+        f"🚪 **خرجوا:** {stats['left']}\n"
+        f"📨 **الإجمالي:** {stats['total']}"
+    )
+
+    embed.set_footer(text=ctx.guild.name)
+    await ctx.send(embed=embed)
+
 
 # =========================
 # أوامر المستوى
@@ -2085,6 +2579,7 @@ async def level_command(ctx, member: discord.Member = None):
         f"**المستوى الحالي:** لفل {current_level}\n"
         f"**التقدم:** {current_progress}/{needed_progress} XP"
     )
+
 
 # =========================
 # أوامر إرسال اللوحات
@@ -2122,6 +2617,7 @@ async def send_ticket_panel_command(ctx):
 
     await ctx.send(embed=embed, view=TicketPanelView())
 
+
 @bot.command(name="تكت-وسيط")
 async def send_mediator_ticket_panel(ctx):
     if not is_admin_member(ctx.author):
@@ -2131,9 +2627,11 @@ async def send_mediator_ticket_panel(ctx):
     embed = make_mediator_panel_embed(ctx.guild)
     await ctx.send(embed=embed, view=MediatorTicketPanelView())
 
+
 @bot.command(name="تيست")
 async def test_command(ctx):
     await ctx.send("شغال")
+
 
 # =========================
 # تشغيل
