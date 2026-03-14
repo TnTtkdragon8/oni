@@ -2395,13 +2395,14 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
                 msg = await channel.fetch_message(payload.message_id)
                 if msg.embeds:
                     embed = msg.embeds[0]
-                    # تحديث حقل المشتركين
+                    # تحديث حقل "Entries"
                     for i, field in enumerate(embed.fields):
                         if field.name == "Entries":
                             embed.set_field_at(i, name="Entries", value=str(len(giveaway.entries)), inline=True)
                             break
                     await msg.edit(embed=embed)
-            except Exception:
+            except Exception as e:
+                print(f"Error updating giveaway embed on reaction add: {e}")
                 pass
 
 
@@ -2432,25 +2433,32 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
                             embed.set_field_at(i, name="Entries", value=str(len(giveaway.entries)), inline=True)
                             break
                     await msg.edit(embed=embed)
-            except Exception:
+            except Exception as e:
+                print(f"Error updating giveaway embed on reaction remove: {e}")
                 pass
 
 
 # =========================
-# مهمة دورية لفحص الجيفات المنتهية
+# مهمة دورية لفحص الجيفات المنتهية (كل 10 ثوانٍ)
 # =========================
-@tasks.loop(minutes=1)
+@tasks.loop(seconds=10)
 async def check_giveaways_loop():
     now = time.time()
     ended_ids = []
-    for msg_id, giveaway in active_giveaways.items():
+    for msg_id, giveaway in list(active_giveaways.items()):
         if giveaway.end_time <= now:
             ended_ids.append(msg_id)
-            await end_giveaway(giveaway)
+            try:
+                await end_giveaway(giveaway)
+            except Exception as e:
+                print(f"Error ending giveaway {msg_id}: {e}")
 
     for msg_id in ended_ids:
-        del active_giveaways[msg_id]
-        delete_giveaway_from_db(msg_id)
+        try:
+            del active_giveaways[msg_id]
+            delete_giveaway_from_db(msg_id)
+        except Exception as e:
+            print(f"Error cleaning up giveaway {msg_id}: {e}")
 
 
 async def end_giveaway(giveaway: Giveaway):
@@ -2459,12 +2467,14 @@ async def end_giveaway(giveaway: Giveaway):
     if not channel:
         try:
             channel = await bot.fetch_channel(giveaway.channel_id)
-        except Exception:
+        except Exception as e:
+            print(f"Could not fetch channel for giveaway {giveaway.message_id}: {e}")
             return
 
     try:
         msg = await channel.fetch_message(giveaway.message_id)
-    except Exception:
+    except Exception as e:
+        print(f"Could not fetch message for giveaway {giveaway.message_id}: {e}")
         msg = None
 
     winners = giveaway.pick_winners()
@@ -2498,7 +2508,8 @@ async def end_giveaway(giveaway: Giveaway):
             if embed.author:
                 new_embed.set_author(name=embed.author.name, icon_url=embed.author.icon_url)
             await msg.edit(embed=new_embed)
-        except Exception:
+        except Exception as e:
+            print(f"Could not update giveaway embed: {e}")
             pass
 
 
@@ -2536,7 +2547,7 @@ async def on_ready():
     except Exception as e:
         print(f"Slash sync error: {e}")
 
-    print("✅ VERSION FINAL MEDIATOR + INVITES + /s + GIVEAWAY")
+    print("✅ VERSION FINAL MEDIATOR + INVITES + /s + GIVEAWAY (10s loop)")
     print(f"البوت شغال كـ {bot.user}")
 
 
