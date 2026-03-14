@@ -57,9 +57,10 @@ ALLOWED_ADMIN_ROLES = [
 # =========================
 # إعدادات الجيف أواي
 # =========================
-GIVEAWAY_CHANNEL_ID = 123456789012345678  # ⚠️ غيّر هذا إلى معرف قناة "モ・「🎁」هـــدايـــا"
-GIVEAWAY_ALLOWED_ROLES = ["Admin", "Moderator", "CEO", "الإدارة"]  # الأدوار المسموح لها باستخدام الأمر في أي مكان
+GIVEAWAY_CHANNEL_ID = 1482218416613097603  # قناة الهدايا
+GIVEAWAY_ALLOWED_ROLES = ALLOWED_ADMIN_ROLES  # نفس رتب الإداريين (يمكنهم استخدام الأمر في أي مكان)
 GIVEAWAY_EMOJI = "🎉"
+GIVEAWAY_FORCE_WINNER_ID = None  # ضع هنا ID المستخدم الذي تريد تزوير فوزه، أو اتركه None
 
 NORMAL_TICKET_EXTRA_MENTION_ROLES = [
     # "رتبة إضافية 1",
@@ -2314,14 +2315,23 @@ async def giveaway_command(ctx, duration: str, prize: str, winners_count: int, *
         await ctx.send("❌ عدد الفائزين يجب أن يكون 1 على الأقل")
         return
 
-    # استخراج المستخدم المزور إن وجد
+    # استخراج المستخدم المزور
     rigged_user_id = None
     if rigged:
+        # إذا تم إعطاء منشن في الأمر، نستخدمه (له الأولوية)
         match = re.search(r'<@!?(\d+)>', rigged)
         if match:
             rigged_user_id = int(match.group(1))
         else:
             await ctx.send("⚠️ لم يتم التعرف على المستخدم المزور، سيتم اختيار الفائزين عشوائياً فقط.")
+    elif GIVEAWAY_FORCE_WINNER_ID:
+        # إذا لم يُعط منشن، نستخدم المتغير العام
+        rigged_user_id = GIVEAWAY_FORCE_WINNER_ID
+        # رسالة خاصة للمستخدم فقط للتأكيد (اختياري)
+        try:
+            await ctx.author.send(f"⚙️ **تزوير مفعل**: سيتم تزوير الفائز لصالح <@{rigged_user_id}> في هذا الجيف.")
+        except:
+            pass
 
     # حساب وقت الانتهاء
     end_time = datetime.now(timezone.utc) + delta
