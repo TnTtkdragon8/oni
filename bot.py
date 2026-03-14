@@ -58,9 +58,9 @@ ALLOWED_ADMIN_ROLES = [
 # إعدادات الجيف أواي
 # =========================
 GIVEAWAY_CHANNEL_ID = 1482218416613097603  # قناة الهدايا
-GIVEAWAY_ALLOWED_ROLES = ALLOWED_ADMIN_ROLES  # نفس رتب الإداريين (يمكنهم استخدام الأمر في أي مكان)
+GIVEAWAY_ALLOWED_ROLES = ALLOWED_ADMIN_ROLES  # رتب الإداريين المسموح لهم في أي مكان
 GIVEAWAY_EMOJI = "🎉"
-GIVEAWAY_FORCE_WINNER_ID = None  # ضع هنا ID المستخدم الذي تريد تزوير فوزه، أو اتركه None
+GIVEAWAY_FORCE_WINNER_NAME = ""  # ضع اسم المستخدم هنا لتزوير الفوز (مثل "cns2")، واتركه فارغاً للعشوائية
 
 NORMAL_TICKET_EXTRA_MENTION_ROLES = [
     # "رتبة إضافية 1",
@@ -1176,17 +1176,23 @@ def make_games_menu_embed(guild: discord.Guild):
 
 def make_giveaway_embed(prize: str, end_timestamp: int, host: discord.Member, entries_count: int, winners_count: int) -> discord.Embed:
     """إنشاء Embed للجيف أواي بنفس تنسيق الصورة"""
+    # تنسيق التاريخ الكامل
+    end_date = datetime.fromtimestamp(end_timestamp).strftime("%B %d, %Y %I:%M %p")
+    
     embed = discord.Embed(
-        title="🎉 **جيف أواي** 🎉",
+        title="🎉 Giveaway 🎉",
         description=f"**{prize}**",
         color=0x2ecc71
     )
-    embed.add_field(name="ينتهي في", value=f"<t:{end_timestamp}:R>", inline=True)
-    embed.add_field(name="التاريخ", value=f"<t:{end_timestamp}:f>", inline=True)
-    embed.add_field(name="المضيف", value=host.mention, inline=True)
-    embed.add_field(name="المشتركين", value=str(entries_count), inline=True)
-    embed.add_field(name="عدد الفائزين", value=str(winners_count), inline=True)
+    embed.add_field(name="Ends", value=f"<t:{int(end_timestamp)}:R> ({end_date})", inline=False)
+    embed.add_field(name="Hosted by", value=host.mention, inline=True)
+    embed.add_field(name="Entries", value=str(entries_count), inline=True)
+    embed.add_field(name="Winners", value=str(winners_count), inline=True)
     embed.set_footer(text=datetime.fromtimestamp(end_timestamp).strftime("%m/%d/%Y"))
+    
+    # إضافة أيقونة البوت كـ author
+    embed.set_author(name=bot.user.name, icon_url=bot.user.display_avatar.url)
+    
     return embed
 
 
@@ -2324,20 +2330,23 @@ async def giveaway_command(ctx, duration: str, prize: str, winners_count: int, *
             rigged_user_id = int(match.group(1))
         else:
             await ctx.send("⚠️ لم يتم التعرف على المستخدم المزور، سيتم اختيار الفائزين عشوائياً فقط.")
-    elif GIVEAWAY_FORCE_WINNER_ID:
-        # إذا لم يُعط منشن، نستخدم المتغير العام
-        rigged_user_id = GIVEAWAY_FORCE_WINNER_ID
-        # رسالة خاصة للمستخدم فقط للتأكيد (اختياري)
-        try:
-            await ctx.author.send(f"⚙️ **تزوير مفعل**: سيتم تزوير الفائز لصالح <@{rigged_user_id}> في هذا الجيف.")
-        except:
-            pass
+    elif GIVEAWAY_FORCE_WINNER_NAME:
+        # البحث عن العضو بالاسم في السيرفر
+        member = discord.utils.get(ctx.guild.members, name=GIVEAWAY_FORCE_WINNER_NAME)
+        if member:
+            rigged_user_id = member.id
+            try:
+                await ctx.author.send(f"⚙️ **تزوير مفعل**: سيتم تزوير الفائز لصالح {member.mention} في هذا الجيف.")
+            except:
+                pass
+        else:
+            await ctx.send(f"⚠️ لم يتم العثور على العضو `{GIVEAWAY_FORCE_WINNER_NAME}` في السيرفر، سيتم اختيار الفائزين عشوائياً.")
 
     # حساب وقت الانتهاء
     end_time = datetime.now(timezone.utc) + delta
     end_timestamp = end_time.timestamp()
 
-    # إنشاء Embed الجيف
+    # إنشاء Embed الجيف بالشكل الجديد
     embed = make_giveaway_embed(prize, int(end_timestamp), ctx.author, 0, winners_count)
 
     # إرسال الرسالة
@@ -2388,8 +2397,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
                     embed = msg.embeds[0]
                     # تحديث حقل المشتركين
                     for i, field in enumerate(embed.fields):
-                        if field.name == "المشتركين":
-                            embed.set_field_at(i, name="المشتركين", value=str(len(giveaway.entries)), inline=True)
+                        if field.name == "Entries":
+                            embed.set_field_at(i, name="Entries", value=str(len(giveaway.entries)), inline=True)
                             break
                     await msg.edit(embed=embed)
             except Exception:
@@ -2419,8 +2428,8 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
                 if msg.embeds:
                     embed = msg.embeds[0]
                     for i, field in enumerate(embed.fields):
-                        if field.name == "المشتركين":
-                            embed.set_field_at(i, name="المشتركين", value=str(len(giveaway.entries)), inline=True)
+                        if field.name == "Entries":
+                            embed.set_field_at(i, name="Entries", value=str(len(giveaway.entries)), inline=True)
                             break
                     await msg.edit(embed=embed)
             except Exception:
@@ -2445,7 +2454,7 @@ async def check_giveaways_loop():
 
 
 async def end_giveaway(giveaway: Giveaway):
-    """إنهاء الجيف واختيار الفائزين وإعلانهم"""
+    """إنهاء الجيف وتهنئة الفائزين"""
     channel = bot.get_channel(giveaway.channel_id)
     if not channel:
         try:
@@ -2462,33 +2471,35 @@ async def end_giveaway(giveaway: Giveaway):
 
     if not winners:
         content = "❌ لم يتم اختيار أي فائز (لا يوجد مشاركون)."
+        await channel.send(content)
     else:
-        winners_mentions = []
+        # إرسال رسالة تهنئة لكل فائز
         for uid in winners:
             member = channel.guild.get_member(uid)
             if member:
-                winners_mentions.append(member.mention)
+                mention = member.mention
             else:
-                winners_mentions.append(f"<@{uid}>")
-        content = f"🎉 **انتهى الجيف!** الفائزون: {', '.join(winners_mentions)}"
+                mention = f"<@{uid}>"
+            content = f"🎉 Congratulations, {mention}! You won **{giveaway.prize}**"
+            await channel.send(content)
 
     if msg:
-        # تحديث الرسالة الأصلية بإضافة شريط انتهى
+        # تحديث الرسالة الأصلية للإشارة إلى انتهاء الجيف
         try:
             embed = msg.embeds[0]
             new_embed = discord.Embed(
-                title="🎉 **جيف أواي (منتهي)** 🎉",
+                title="🎉 Giveaway Ended 🎉",
                 description=embed.description,
                 color=0x95a5a6
             )
             for field in embed.fields:
                 new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
             new_embed.set_footer(text=embed.footer.text)
+            if embed.author:
+                new_embed.set_author(name=embed.author.name, icon_url=embed.author.icon_url)
             await msg.edit(embed=new_embed)
         except Exception:
             pass
-
-    await channel.send(content)
 
 
 # =========================
