@@ -100,7 +100,7 @@ SPAM_MAX_MESSAGES = 6
 SPAM_INTERVAL_SECONDS = 8
 SPAM_TIMEOUT_MINUTES = 10
 
-TICKET_AUTO_DELETE_SECONDS = 99999999999999
+TICKET_AUTO_DELETE_SECONDS = 9999999999999999999999999999999
 TICKET_EXTEND_SECONDS = 15 * 60
 TICKET_REMINDER_SECONDS = 2 * 60
 
@@ -1087,11 +1087,6 @@ def make_ticket_embed(
     if extra_member_text:
         extra += f"\n👥 العضو المضاف: {extra_member_text}"
 
-    if auto_delete and delete_at_ts:
-        remaining = max(0, int(delete_at_ts - time.time()))
-        minutes = remaining // 60
-        seconds = remaining % 60
-        extra += f"\n⏳ الحذف التلقائي بعد: {minutes}د {seconds}ث"
 
     embed = discord.Embed(
         title=f"🎫 تذكرة جديدة - {ticket_type}",
