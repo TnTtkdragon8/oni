@@ -100,7 +100,7 @@ SPAM_MAX_MESSAGES = 6
 SPAM_INTERVAL_SECONDS = 8
 SPAM_TIMEOUT_MINUTES = 10
 
-TICKET_AUTO_DELETE_SECONDS = 15 * 60
+TICKET_AUTO_DELETE_SECONDS = 99999999999999
 TICKET_EXTEND_SECONDS = 15 * 60
 TICKET_REMINDER_SECONDS = 2 * 60
 
@@ -2033,35 +2033,7 @@ class NormalTicketManageView(BaseTicketManageView):
     async def claim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.claim_ticket_logic(interaction)
 
-    @discord.ui.button(label="مد 15د", style=discord.ButtonStyle.primary, emoji="⏳", custom_id="ticket_extend_normal")
-    async def extend_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not isinstance(interaction.user, discord.Member):
-            return
 
-        ticket = get_ticket_by_channel(interaction.channel.id)
-        if not ticket:
-            await interaction.response.send_message("❌ بيانات التكت غير موجودة.", ephemeral=True)
-            return
-
-        if ticket.get("kind") != "normal":
-            await interaction.response.send_message("❌ الأمر ده للتكت العادي فقط.", ephemeral=True)
-            return
-
-        if not is_ticket_staff(interaction.user):
-            await interaction.response.send_message("❌ مش عندك إذن.", ephemeral=True)
-            return
-
-        current_delete_at = float(ticket["delete_at"] or time.time())
-        new_delete_at = current_delete_at + TICKET_EXTEND_SECONDS
-        update_ticket_delete_at(interaction.channel.id, new_delete_at)
-        schedule_ticket_delete(interaction.channel.id, new_delete_at)
-
-        try:
-            await refresh_ticket_panel_message(interaction.message)
-        except Exception:
-            pass
-
-        await interaction.response.send_message("✅ تم تمديد التكت 15 دقيقة.")
 
     @discord.ui.button(label="قفل التكت", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="ticket_close_normal")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
