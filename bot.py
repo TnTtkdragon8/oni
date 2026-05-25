@@ -2121,7 +2121,14 @@ class TicketPanelView(discord.ui.View):
                     read_message_history=True
                 )
 
-        channel_name = f"ticket-{sanitize_channel_name(member.name)}"
+        existing = [
+            c for c in guild.channels
+            if c.name.startswith("ticket-")
+        ]
+
+        ticket_number = len(existing) + 1
+
+        channel_name = f"ticket-{ticket_number}"
         channel = await guild.create_text_channel(
             name=channel_name,
             category=category,
