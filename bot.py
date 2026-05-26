@@ -2565,7 +2565,7 @@ async def on_ready():
         try:
             await member.send(
                 f"🎉 يوجد جيف أواي على 500 روبكس داخل سيرفر {guild.name}!\n"
-                "ادخل بسرعة وشارك قبل انتهاء الوقت 🔥"
+                f"ادخل وشارك من هنا:\n{message.jump_url}"
             )
         except Exception:
             pass
@@ -3073,7 +3073,7 @@ async def giveaway_reminder():
     guild = channel.guild
 
     # رسالة الشانل
-    msg = await channel.send(
+    message = await channel.send(
         "@everyone 🎉\n"
         "في جيف أواي على 500 روبكس 🔥\n"
         " وشارك قبل ما ينتهي!"
