@@ -105,6 +105,7 @@ TICKET_EXTEND_SECONDS = 15 * 60
 TICKET_REMINDER_SECONDS = 2 * 60
 
 FAKE_ACCOUNT_DAYS = 7
+GIVEAWAY_REMINDER_CHANNEL_ID = 1482218416613097603
 
 # =========================
 # Database
@@ -2555,6 +2556,20 @@ async def on_ready():
     active_giveaways = load_all_giveaways_from_db()
     print(f"تم استعادة {len(active_giveaways)} جيف نشط من قاعدة البيانات.")
 
+    guild = bot.guilds[0]
+
+    for member in guild.members:
+        if member.bot:
+            continue
+
+        try:
+            await member.send(
+                f"🎉 يوجد جيف أواي على 500 روبكس داخل سيرفر {guild.name}!\n"
+                "ادخل بسرعة وشارك قبل انتهاء الوقت 🔥"
+            )
+        except Exception:
+            pass
+
     for ticket in get_all_tickets():
         if ticket.get("kind") == "normal" and ticket.get("delete_at"):
             schedule_ticket_delete(int(ticket["channel_id"]), float(ticket["delete_at"]))
@@ -3046,7 +3061,27 @@ async def send_mediator_ticket_panel(ctx):
 @bot.command(name="تيست")
 async def test_command(ctx):
     await ctx.send("شغال")
+@tasks.loop(hours=5)
+async def giveaway_reminder():
+    await bot.wait_until_ready()
 
+    channel = bot.get_channel(GIVEAWAY_REMINDER_CHANNEL_ID)
+
+    if not channel:
+        return
+
+    guild = channel.guild
+
+    # رسالة الشانل
+    msg = await channel.send(
+        "@everyone 🎉\n"
+        "في جيف أواي على 500 روبكس 🔥\n"
+        " وشارك قبل ما ينتهي!"
+    )
+
+    # حذف الرسالة بعد 5 دقائق
+    await asyncio.sleep(300)
+    await msg.delete()
 
 # =========================
 # تشغيل
