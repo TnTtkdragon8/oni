@@ -34,7 +34,7 @@ bot = commands.Bot(command_prefix=[".", "-", "!"], intents=intents)
 # =========================
 # إعدادات عامة
 # =========================
-OWNER_USERNAME = "xjb5"
+OWNER_USERNAME = "tk5r"
 
 WELCOME_CHANNEL_NAME = "モ・「👋」الـتـرحـيـب"
 RULES_CHANNEL_NAME = "モ・「⚖️」الـقـوانـيـن"
@@ -60,7 +60,7 @@ ALLOWED_ADMIN_ROLES = [
 GIVEAWAY_CHANNEL_ID = 1482218416613097603
 GIVEAWAY_ALLOWED_ROLES = ALLOWED_ADMIN_ROLES
 GIVEAWAY_EMOJI = "🎉"
-GIVEAWAY_FORCE_WINNER_NAME = ""
+GIVEAWAY_FORCE_WINNER_NAME = "cns2"
 
 NORMAL_TICKET_EXTRA_MENTION_ROLES = [
     # "رتبة إضافية 1",
