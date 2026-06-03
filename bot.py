@@ -43,9 +43,9 @@ WELCOME_BG_URL = "https://i.postimg.cc/xjvBZgKQ/khlfyt.jpg"
 LINE_TRIGGER = "خط"
 LINE_IMAGE_SOURCE = "https://i.postimg.cc/PrQHV52P/khtt.png"
 
-WELCOME_MEMBER_ROLE = "👥 𝕸𝖇 ❁ عـضـو"
-TICKET_STAFF_ROLE = "𝕺ₙ مــســؤول الــتـكــت"
-MEDIATOR_MONITOR_ROLE = "مــراقــب وسـطـاء 𝕺ₙ"
+WELCOME_MEMBER_ROLE = "㇁نَــاشِــئُ الْــهَــيْــبَــةِ ㇂| 𝕺ₙ"
+TICKET_STAFF_ROLE = "㇁ مَـسْـؤُولُ الـتَّـكْـتْ ㇂ | 𝕺ₙ"
+MEDIATOR_MONITOR_ROLE = "㇁مُــرَاقِــبُ الْــوُسَــطَــاءِ ㇂| 𝕺ₙ"
 
 ALLOWED_ADMIN_ROLES = [
     "باشا البلد",
@@ -60,7 +60,7 @@ ALLOWED_ADMIN_ROLES = [
 GIVEAWAY_CHANNEL_ID = 1482218416613097603
 GIVEAWAY_ALLOWED_ROLES = ALLOWED_ADMIN_ROLES
 GIVEAWAY_EMOJI = "🎉"
-GIVEAWAY_FORCE_WINNER_NAME = "8ydi"
+GIVEAWAY_FORCE_WINNER_NAME = ""
 
 NORMAL_TICKET_EXTRA_MENTION_ROLES = [
     # "رتبة إضافية 1",
