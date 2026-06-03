@@ -2750,8 +2750,8 @@ async def on_command_error(ctx, error):
             msg = "❌ استخدم: `.تايم @الشخص 10د السبب` أو `.تايم @الشخص 2س السبب`"
         elif ctx.command and ctx.command.name == "ت":
             msg = "❌ استخدم: `.ت @الشخص السبب`"
-        elif ctx.command and ctx.command.name == "حذف":
-            msg = "❌ استخدم: `.حذف 10`"
+        elif ctx.command and ctx.command.name == "مسح":
+            msg = "❌ استخدم: `.مسح 10`"
         elif ctx.command and ctx.command.name == "مد":
             msg = "❌ استخدم: `.مد` داخل التكت العادي"
         elif ctx.command and ctx.command.name == "دعوات":
@@ -2915,7 +2915,7 @@ async def ban_command(ctx, member: discord.Member, *, reason: str = "بدون س
         await admin_dm_or_temp(ctx.author, f"❌ حصل خطأ: {e}")
 
 
-@bot.command(name="حذف")
+@bot.command(name="مسح")
 async def clear_command(ctx, amount: int):
     if not (is_owner_user(ctx.author) or is_admin_member(ctx.author)):
         await count_unauthorized_attempt(ctx)
